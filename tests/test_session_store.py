@@ -78,3 +78,9 @@ def test_gitlab_namespace_is_distinct():
     digest = hashlib.sha256(SESSION.encode()).hexdigest()
     assert session_store._key(SESSION, 'gitlab') == 'session:gitlab:' + digest
     assert session_store._key(SESSION, 'teams') == 'session:teams:' + digest
+
+
+def test_github_namespace_is_distinct():
+    digest = hashlib.sha256(SESSION.encode()).hexdigest()
+    assert session_store._key(SESSION, 'github') == 'session:github:' + digest
+    assert session_store._key(SESSION, 'gitlab') != session_store._key(SESSION, 'github')

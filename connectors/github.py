@@ -9,7 +9,7 @@ MANIFEST = {"id": "github", "name": "GitHub", "category": "source_code", "fields
 
 def connection_id(config):
     repository = config.get("repository", "")
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or ".." in repository:
+    if not isinstance(repository, str) or not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or ".." in repository:
         raise ValueError("Repository must be in owner/name format")
     return "github:" + repository.lower()
 
