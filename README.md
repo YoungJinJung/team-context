@@ -36,6 +36,10 @@ uv run --no-sync mutmut results
 
 `connectors/`에 Python 모듈을 추가하면 실행기가 자동으로 찾습니다. 모듈은 `MANIFEST`, `connection_id(config)`와 `collect(config)`를 제공합니다. `connection_id`는 커넥터별 접두사와 안정적인 소스 식별자로 구성하며 비밀 정보를 포함하지 않습니다. `MANIFEST`의 `fields`는 연결 화면의 입력 항목으로 표시됩니다. `collect`는 `id`, `type`, `title`, `url`, `updated_at`, `body`를 가진 레코드 목록을 반환합니다. 예제는 [GitHub 커넥터](connectors/github.py)를 확인하세요. 서버 재시작 후 새 커넥터가 표시됩니다. 레코드 ID는 서비스와 소스 범위를 포함해 다른 커넥터와 충돌하지 않아야 합니다. 신뢰할 수 있는 커넥터 코드만 설치하세요.
 
+## 인증 개발 현황
+
+Linear OAuth 2.0 PKCE 클라이언트 기초가 포함되어 있습니다. 아직 웹 연결 화면이나 토큰 저장에 연결되지 않았으며 실제 Linear 연결은 지원하지 않습니다. 콜백을 추가할 때 상태를 사용자 세션에 연결하고, 토큰 회전·보관을 구현해야 합니다. 사용자 개인 API 키를 받는 방식은 기본 인증으로 사용하지 않습니다.
+
 ## 다음 단계
 
 - GitHub App 인증과 비공개 저장소 접근, 페이지 처리 및 변경분 동기화
