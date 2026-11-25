@@ -6,7 +6,7 @@ from storage import clients
 
 
 def _key(session, namespace=None):
-    if namespace not in (None, 'teams', 'gitlab'):
+    if namespace not in (None, 'teams', 'gitlab', 'github'):
         raise ValueError('Invalid namespace')
     if not isinstance(session, str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', session):
         return None

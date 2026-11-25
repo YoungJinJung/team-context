@@ -249,3 +249,35 @@ def test_gitlab_session_remains_private_and_isolated():
         gitlab_sessions.disconnect(cookie)
     from botocore.exceptions import ClientError
     with pytest.raises(ClientError): vault.read(secret)
+
+
+def test_github_app_secret_and_session_are_isolated():
+    import io
+    from unittest.mock import patch
+    from urllib.parse import parse_qs, urlsplit
+    from auth import github, gitlab, teams, vault
+    from auth.sessions import Sessions
+    initialize()
+    app_secret = vault.create({'client_secret':'fake-application-secret'})
+    sessions = Sessions(github.Authorization, github.refresh, 'github')
+    cookie, url = sessions.start('client', github.CALLBACK)
+    state = parse_qs(urlsplit(url).query)['state'][0]
+    class Response(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *args): self.close()
+    try:
+        with patch.dict('os.environ', {'GITHUB_APP_SECRET_ID':app_secret}), patch('auth.github.open_url', return_value=Response(b'{"access_token":"example-access","refresh_token":"example-refresh"}')) as send:
+            user_secret = sessions.complete(cookie, state, 'code')
+        try:
+            assert b'client_secret=fake-application-secret' in send.call_args.args[0].data
+            assert sessions.connected(cookie)
+            assert not Sessions().connected(cookie)
+            assert not Sessions(gitlab.Authorization, gitlab.refresh, 'gitlab').connected(cookie)
+            assert not Sessions(teams.Authorization, teams.refresh, 'teams').connected(cookie)
+            assert sessions.use(cookie, lambda token: token) == 'example-access'
+        finally:
+            sessions.disconnect(cookie)
+        from botocore.exceptions import ClientError
+        with pytest.raises(ClientError): vault.read(user_secret)
+    finally:
+        vault.delete(app_secret)

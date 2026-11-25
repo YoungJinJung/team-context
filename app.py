@@ -12,13 +12,14 @@ from pathlib import Path
 import connectors
 from storage import persist, search, remove_public_source, cleanup_unavailable, list_public_sources
 from auth.sessions import Sessions
-from auth import linear_preview, teams, teams_preview, gitlab, gitlab_preview
+from auth import linear_preview, teams, teams_preview, gitlab, gitlab_preview, github, github_preview
 from botocore.exceptions import BotoCoreError, ClientError
 
 ROOT = Path(__file__).parent
 SESSIONS = Sessions()
 TEAMS_SESSIONS = Sessions(teams.Authorization, teams.refresh, "teams")
 GITLAB_SESSIONS = Sessions(gitlab.Authorization, gitlab.refresh, "gitlab")
+GITHUB_SESSIONS = Sessions(github.Authorization, github.refresh, "github")
 STORAGE_LOCK = threading.Lock()
 CALLBACK = "http://127.0.0.1:8765/oauth/linear/callback"
 TEAMS_CALLBACK = "http://127.0.0.1:8765/oauth/teams/callback"
@@ -62,6 +63,38 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/oauth/github/callback":
+            if self.headers.get("Host") != "127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid host"})
+            values = urllib.parse.parse_qs(parsed.query)
+            if len(values.get("state", [])) != 1 or len(values.get("code", [])) != 1:
+                return self.send(400, {"error": "Invalid callback"})
+            try:
+                GITHUB_SESSIONS.complete(self.cookie("team_context_github_session"), values["state"][0], values["code"][0])
+            except ValueError:
+                return self.send(400, {"error": "Invalid or expired authorization"})
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+                return self.send(502, {"error": "Authorization failed"})
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if parsed.path in ("/api/github/status", "/api/github/preview"):
+            if self.headers.get("Host") != "127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid host"})
+            session = self.cookie("team_context_github_session")
+            try:
+                if parsed.path == "/api/github/status":
+                    return self.send(200, {"connected": GITHUB_SESSIONS.connected(session)})
+                repository = urllib.parse.parse_qs(parsed.query).get("repository", [""])[0]
+                result = GITHUB_SESSIONS.use(session, lambda token: github_preview.pull_requests(token, repository))
+                return self.send(200, {"items": result})
+            except ValueError:
+                return self.send(400, {"error": "GitHub preview unavailable"})
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+                return self.send(502, {"error": "Unable to load GitHub data"})
         if parsed.path == "/oauth/gitlab/callback":
             if self.headers.get("Host") != "127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid host"})
@@ -188,6 +221,33 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, {"error": "Not found"})
 
     def do_POST(self):
+        if self.path in ("/api/github/start", "/api/github/disconnect"):
+            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid origin"})
+            session = self.cookie("team_context_github_session")
+            try:
+                if self.path == "/api/github/disconnect":
+                    GITHUB_SESSIONS.disconnect(session)
+                    return self.send(200, {"connected": False})
+                if GITHUB_SESSIONS.connected(session):
+                    return self.send(409, {"error": "Disconnect the existing connection first."})
+                client_id = os.environ.get("GITHUB_CLIENT_ID")
+                if not client_id or not os.environ.get("GITHUB_APP_SECRET_ID"):
+                    return self.send(503, {"error": "Set GITHUB_CLIENT_ID and GITHUB_APP_SECRET_ID."})
+                session, url = GITHUB_SESSIONS.start(client_id, github.CALLBACK)
+            except ValueError:
+                return self.send(404, {"error": "No connection"})
+            except (OSError, BotoCoreError, ClientError):
+                return self.send(502, {"error": "Unable to manage GitHub connection"})
+            body = json.dumps({"url": url}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Set-Cookie", "team_context_github_session=" + session + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path in ("/api/gitlab/start", "/api/gitlab/disconnect"):
             if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid origin"})

@@ -508,3 +508,94 @@ def test_gitlab_preview_never_persists_private_data(client):
     assert response.status == 200 and json.loads(data)['items'][0]['title'] == 'private'
     persist.assert_not_called()
     search.assert_not_called()
+
+
+def test_github_oauth_and_private_preview_routes(client):
+    host = {'Host':'127.0.0.1:8765'}
+    post = {**host, 'Origin':'http://127.0.0.1:8765'}
+    cookie = {**host, 'Cookie':'team_context_github_session=github-cookie; team_context_session=linear'}
+    with patch('app.GITHUB_SESSIONS') as sessions, patch.dict('os.environ', {'GITHUB_CLIENT_ID':'client', 'GITHUB_APP_SECRET_ID':'secret-id'}):
+        sessions.connected.return_value = False
+        sessions.start.return_value = ('github-cookie', 'https://github.com/login/oauth/authorize')
+        response, data = request(client, 'POST', '/api/github/start', headers=post)
+        assert response.status == 200 and json.loads(data) == {'url':'https://github.com/login/oauth/authorize'}
+        assert response.getheader('Set-Cookie') == 'team_context_github_session=github-cookie; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000'
+        assert response.getheader('Cache-Control') == 'no-store'
+        sessions.start.assert_called_once_with('client', app.github.CALLBACK)
+        response, _ = request(client, 'GET', '/oauth/github/callback?state=s&code=c', headers=cookie)
+        assert response.status == 303 and response.getheader('Location') == '/'
+        assert response.getheader('Cache-Control') == 'no-store' and response.getheader('Content-Length') == '0'
+        sessions.complete.assert_called_once_with('github-cookie', 's', 'c')
+        sessions.connected.return_value = True
+        response, data = request(client, 'GET', '/api/github/status', headers=cookie)
+        assert response.status == 200 and json.loads(data) == {'connected': True}
+        sessions.use.return_value = [{'title':'private','url':'https://github.com/a/b'}]
+        response, data = request(client, 'GET', '/api/github/preview?repository=a%2Fb', headers=cookie)
+        assert response.status == 200 and json.loads(data) == {'items':[{'title':'private','url':'https://github.com/a/b'}]}
+        assert response.getheader('Cache-Control') == 'no-store'
+        operation = sessions.use.call_args.args[1]
+        assert sessions.use.call_args.args[0] == 'github-cookie'
+        with patch('app.github_preview.pull_requests', return_value=[]) as preview:
+            assert operation('token') == []
+            preview.assert_called_once_with('token', 'a/b')
+        response, data = request(client, 'POST', '/api/github/start', headers={**post, **cookie})
+        assert response.status == 409 and json.loads(data) == {'error':'Disconnect the existing connection first.'}
+        response, data = request(client, 'POST', '/api/github/disconnect', headers={**post, **cookie})
+        assert response.status == 200 and json.loads(data) == {'connected':False}
+        sessions.disconnect.assert_called_once_with('github-cookie')
+
+
+def test_github_oauth_rejects_invalid_requests_and_hides_errors(client):
+    host = {'Host':'127.0.0.1:8765'}
+    post = {**host, 'Origin':'http://127.0.0.1:8765'}
+    for path in ('/oauth/github/callback?state=s&code=c', '/api/github/status', '/api/github/preview'):
+        response, data = request(client, 'GET', path, headers={'Host':'evil.example'})
+        assert response.status == 403 and json.loads(data) == {'error':'Invalid host'}
+    for path in ('/api/github/start', '/api/github/disconnect'):
+        response, data = request(client, 'POST', path, headers={**host, 'Origin':'https://evil.example'})
+        assert response.status == 403 and json.loads(data) == {'error':'Invalid origin'}
+    for query in ('', '?state=s', '?state=s&state=t&code=c', '?error=access_denied&state=s'):
+        response, data = request(client, 'GET', '/oauth/github/callback' + query, headers=host)
+        assert response.status == 400 and json.loads(data) == {'error':'Invalid callback'}
+    with patch('app.GITHUB_SESSIONS') as sessions:
+        sessions.complete.side_effect = ValueError('private')
+        response, data = request(client, 'GET', '/oauth/github/callback?state=s&code=c', headers=host)
+        assert response.status == 400 and json.loads(data) == {'error':'Invalid or expired authorization'}
+        sessions.complete.side_effect = OSError('private')
+        response, data = request(client, 'GET', '/oauth/github/callback?state=s&code=c', headers=host)
+        assert response.status == 502 and json.loads(data) == {'error':'Authorization failed'}
+        sessions.connected.return_value = False
+        with patch.dict('os.environ', {}, clear=True):
+            response, data = request(client, 'POST', '/api/github/start', headers=post)
+            assert response.status == 503 and json.loads(data) == {'error':'Set GITHUB_CLIENT_ID and GITHUB_APP_SECRET_ID.'}
+        sessions.disconnect.side_effect = ValueError('private')
+        response, data = request(client, 'POST', '/api/github/disconnect', headers=post)
+        assert response.status == 404 and json.loads(data) == {'error':'No connection'}
+        sessions.disconnect.side_effect = OSError('private')
+        response, data = request(client, 'POST', '/api/github/disconnect', headers=post)
+        assert response.status == 502 and json.loads(data) == {'error':'Unable to manage GitHub connection'}
+        sessions.use.side_effect = ValueError('private')
+        response, data = request(client, 'GET', '/api/github/preview', headers=host)
+        assert response.status == 400 and json.loads(data) == {'error':'GitHub preview unavailable'}
+        sessions.use.side_effect = OSError('private')
+        response, data = request(client, 'GET', '/api/github/preview', headers=host)
+        assert response.status == 502 and json.loads(data) == {'error':'Unable to load GitHub data'}
+
+
+def test_github_preview_never_persists_private_data(client):
+    headers = {'Host':'127.0.0.1:8765', 'Cookie':'team_context_github_session=github-cookie'}
+    with patch('app.GITHUB_SESSIONS.use', return_value=[{'title':'private','url':'https://github.com/a/b'}]), patch('app.persist') as persist, patch('app.search') as search:
+        response, data = request(client, 'GET', '/api/github/preview?repository=a%2Fb', headers=headers)
+    assert response.status == 200 and json.loads(data)['items'][0]['title'] == 'private'
+    persist.assert_not_called()
+    search.assert_not_called()
+
+
+def test_github_start_requires_both_app_settings(client):
+    headers = {'Host':'127.0.0.1:8765', 'Origin':'http://127.0.0.1:8765'}
+    for config in ({'GITHUB_CLIENT_ID':'id'}, {'GITHUB_APP_SECRET_ID':'ref'}):
+        with patch.dict('os.environ', config, clear=True), patch('app.GITHUB_SESSIONS') as sessions:
+            sessions.connected.return_value = False
+            response, data = request(client, 'POST', '/api/github/start', headers=headers)
+            assert response.status == 503 and json.loads(data) == {'error':'Set GITHUB_CLIENT_ID and GITHUB_APP_SECRET_ID.'}
+            sessions.start.assert_not_called()
