@@ -15,6 +15,7 @@ def test_session_binds_attempt_and_stores_tokens():
     attempt = Mock()
     attempt.url.return_value = 'https://linear.app/oauth/authorize?state=sample'
     attempt.exchange.return_value = {'access_token': 'a', 'refresh_token': 'r'}
+    attempt.client_id = 'client'
     with patch('auth.sessions.Authorization', return_value=attempt) as factory, patch('auth.sessions.secrets.token_urlsafe', return_value='cookie') as random, patch('auth.sessions.time.monotonic', return_value=100), patch('auth.sessions.vault.create', return_value='opaque-id') as create:
         sessions = Sessions()
         assert sessions.start('client', 'http://127.0.0.1/callback') == ('cookie', attempt.url())
@@ -23,7 +24,7 @@ def test_session_binds_attempt_and_stores_tokens():
     factory.assert_called_once_with('client', 'http://127.0.0.1/callback')
     random.assert_called_once_with(32)
     attempt.exchange.assert_called_once_with('state', 'code')
-    create.assert_called_once_with({'access_token': 'a', 'refresh_token': 'r'})
+    create.assert_called_once_with({'access_token': 'a', 'refresh_token': 'r', 'client_id': 'client'})
 
 
 def test_missing_or_expired_session():
@@ -123,3 +124,75 @@ def test_use_only_reads_current_session_secret():
         assert sessions.use(session, lambda token: token + '-result') == 'private-result'
         read.assert_called_once_with('secret')
         with pytest.raises(ValueError, match='No connection'): sessions.use('other', lambda token: token)
+
+
+def unauthorized():
+    from urllib.error import HTTPError
+    return HTTPError('https://api.linear.app/graphql', 401, 'unauthorized', {}, None)
+
+
+def test_unauthorized_refreshes_stores_and_retries_once():
+    sessions = Sessions()
+    session, _ = sessions.start('client', 'http://127.0.0.1/callback')
+    old = {'access_token': 'old', 'refresh_token': 'refresh-old', 'client_id': 'client'}
+    renewed = {'access_token': 'new', 'refresh_token': 'refresh-new'}
+    operation = Mock(side_effect=[unauthorized(), 'ok'])
+    with patch('auth.sessions.Authorization.exchange', return_value={}), patch('auth.sessions.vault.create', return_value='secret'), patch('auth.sessions.vault.read', return_value=old), patch('auth.sessions.refresh', return_value=renewed) as refresh, patch('auth.sessions.vault.replace') as replace:
+        sessions.complete(session, 'state', 'code')
+        assert sessions.use(session, operation) == 'ok'
+    refresh.assert_called_once_with('client', 'refresh-old')
+    replace.assert_called_once_with('secret', {**renewed, 'client_id': 'client'})
+    assert [call.args for call in operation.call_args_list] == [('old',), ('new',)]
+
+
+def test_refresh_failure_does_not_retry_or_replace():
+    sessions = Sessions()
+    session, _ = sessions.start('client', 'http://127.0.0.1/callback')
+    token = {'access_token': 'old', 'refresh_token': 'refresh-old', 'client_id': 'client'}
+    operation = Mock(side_effect=unauthorized())
+    with patch('auth.sessions.Authorization.exchange', return_value={}), patch('auth.sessions.vault.create', return_value='secret'), patch('auth.sessions.vault.read', return_value=token), patch('auth.sessions.refresh', side_effect=OSError('failed')), patch('auth.sessions.vault.replace') as replace:
+        sessions.complete(session, 'state', 'code')
+        with pytest.raises(OSError): sessions.use(session, operation)
+    assert operation.call_count == 1
+    replace.assert_not_called()
+
+
+def test_failed_store_never_retries_api():
+    sessions = Sessions()
+    session, _ = sessions.start('client', 'http://127.0.0.1/callback')
+    token = {'access_token': 'old', 'refresh_token': 'refresh-old', 'client_id': 'client'}
+    operation = Mock(side_effect=unauthorized())
+    with patch('auth.sessions.Authorization.exchange', return_value={}), patch('auth.sessions.vault.create', return_value='secret'), patch('auth.sessions.vault.read', return_value=token), patch('auth.sessions.refresh', return_value={'access_token': 'new', 'refresh_token': 'next'}), patch('auth.sessions.vault.replace', side_effect=OSError('failed')):
+        sessions.complete(session, 'state', 'code')
+        with pytest.raises(OSError): sessions.use(session, operation)
+    assert operation.call_count == 1
+
+
+def test_other_errors_and_legacy_tokens_do_not_refresh():
+    from urllib.error import HTTPError
+    sessions = Sessions()
+    session, _ = sessions.start('client', 'http://127.0.0.1/callback')
+    with patch('auth.sessions.Authorization.exchange', return_value={}), patch('auth.sessions.vault.create', return_value='secret'), patch('auth.sessions.vault.read') as read, patch('auth.sessions.refresh') as refresh:
+        sessions.complete(session, 'state', 'code')
+        for token, error in [({'access_token': 'old', 'client_id': 'client', 'refresh_token': 'r'}, HTTPError('https://api.linear.app/graphql', 403, 'forbidden', {}, None)), ({'access_token': 'old', 'refresh_token': 'r'}, unauthorized()), ({'access_token': 'old', 'client_id': 'client'}, unauthorized())]:
+            read.return_value = token
+            with pytest.raises(HTTPError): sessions.use(session, Mock(side_effect=error))
+        refresh.assert_not_called()
+
+
+def test_concurrent_requests_refresh_only_once():
+    sessions = Sessions()
+    session, _ = sessions.start('client', 'http://127.0.0.1/callback')
+    token = {'access_token': 'old', 'refresh_token': 'old-refresh', 'client_id': 'client'}
+    renewed = {'access_token': 'new', 'refresh_token': 'new-refresh'}
+    def operation(value):
+        if value == 'old': raise unauthorized()
+        return value
+    def replace(secret, value):
+        token.clear()
+        token.update(value)
+    with patch('auth.sessions.Authorization.exchange', return_value={}), patch('auth.sessions.vault.create', return_value='secret'), patch('auth.sessions.vault.read', side_effect=lambda _: dict(token)), patch('auth.sessions.refresh', return_value=renewed) as refresh, patch('auth.sessions.vault.replace', side_effect=replace):
+        sessions.complete(session, 'state', 'code')
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            assert list(pool.map(lambda _: sessions.use(session, operation), range(2))) == ['new', 'new']
+    refresh.assert_called_once_with('client', 'old-refresh')
