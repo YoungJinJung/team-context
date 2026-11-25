@@ -4,6 +4,13 @@ import pytest
 from auth.sessions import Sessions
 
 
+@pytest.fixture(autouse=True)
+def fake_store():
+    values = {}
+    with patch('auth.sessions.session_store.put', side_effect=lambda session, secret: values.__setitem__(session, secret)), patch('auth.sessions.session_store.get', side_effect=lambda session: values.get(session)), patch('auth.sessions.session_store.remove', side_effect=lambda session: values.pop(session)):
+        yield values
+
+
 def test_session_binds_attempt_and_stores_tokens():
     attempt = Mock()
     attempt.url.return_value = 'https://linear.app/oauth/authorize?state=sample'
@@ -92,3 +99,17 @@ def test_disconnect_failure_can_be_retried():
         sessions.disconnect(session)
         assert not sessions.connected(session)
         assert delete.call_count == 2
+
+
+def test_failed_reference_write_deletes_new_secret():
+    sessions = Sessions()
+    session, _ = sessions.start('client', 'http://127.0.0.1/callback')
+    with patch('auth.sessions.Authorization.exchange', return_value={}), patch('auth.sessions.vault.create', return_value='secret'), patch('auth.sessions.session_store.put', side_effect=OSError('failed')), patch('auth.sessions.vault.delete') as delete:
+        with pytest.raises(OSError): sessions.complete(session, 'state', 'code')
+    delete.assert_called_once_with('secret')
+
+
+def test_disconnect_missing_session_error():
+    sessions = Sessions()
+    with pytest.raises(ValueError, match='^No connection$'):
+        sessions.disconnect('missing')

@@ -41,3 +41,12 @@ def test_creation_failure_propagates():
     with patch('auth.vault.client') as client:
         client.return_value.create_secret.side_effect = OSError('unavailable')
         with pytest.raises(OSError): vault.create(TOKENS)
+
+
+def test_delete_is_idempotent_but_does_not_hide_other_failures():
+    from botocore.exceptions import ClientError
+    with patch('auth.vault.client') as client:
+        client.return_value.delete_secret.side_effect = ClientError({'Error': {'Code': 'ResourceNotFoundException'}}, 'DeleteSecret')
+        vault.delete(ID)
+        client.return_value.delete_secret.side_effect = ClientError({'Error': {'Code': 'AccessDeniedException'}}, 'DeleteSecret')
+        with pytest.raises(ClientError): vault.delete(ID)
