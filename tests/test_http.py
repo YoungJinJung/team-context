@@ -354,3 +354,76 @@ def test_source_list_local_host_and_failure(client):
     with patch('app.list_public_sources', side_effect=OSError('secret')):
         response, data = request(client, 'GET', '/api/sources', headers={'Host': '127.0.0.1:8765'})
     assert response.status == 502 and json.loads(data) == {'error': 'Unable to list local sources'} and b'secret' not in data
+
+
+def test_teams_oauth_and_preview_routes(client):
+    host = {'Host': '127.0.0.1:8765'}
+    post = {**host, 'Origin': 'http://127.0.0.1:8765'}
+    with patch('app.TEAMS_SESSIONS') as sessions, patch.dict('os.environ', {'TEAMS_CLIENT_ID': 'client'}):
+        sessions.connected.return_value = False
+        sessions.start.return_value = ('cookie-value', 'https://login.microsoftonline.com/organizations/oauth2/v2.0/authorize')
+        response, data = request(client, 'POST', '/api/teams/start', headers=post)
+        assert response.status == 200 and json.loads(data)['url'].startswith('https://login.microsoftonline.com/')
+        assert response.getheader('Set-Cookie') == 'team_context_teams_session=cookie-value; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000'
+        assert response.getheader('Cache-Control') == 'no-store'
+        sessions.start.assert_called_once_with('client', app.TEAMS_CALLBACK)
+        cookie = {**host, 'Cookie': 'team_context_teams_session=cookie-value; team_context_session=linear'}
+        response, _ = request(client, 'GET', '/oauth/teams/callback?state=s&code=c', headers=cookie)
+        assert response.status == 303 and response.getheader('Location') == '/'
+        assert response.getheader('Cache-Control') == 'no-store' and response.getheader('Content-Length') == '0'
+        sessions.complete.assert_called_once_with('cookie-value', 's', 'c')
+        sessions.connected.return_value = True
+        response, data = request(client, 'GET', '/api/teams/status', headers=cookie)
+        assert response.status == 200 and json.loads(data) == {'connected': True}
+        sessions.use.return_value = [{'id': '1', 'name': 'team'}]
+        response, data = request(client, 'GET', '/api/teams/list', headers=cookie)
+        assert response.status == 200 and json.loads(data) == {'items': [{'id': '1', 'name': 'team'}]}
+        sessions.use.assert_called_with('cookie-value', app.teams_preview.teams)
+        response, data = request(client, 'GET', '/api/teams/channels?team=abc', headers=cookie)
+        assert response.status == 200 and json.loads(data)['items'][0]['name'] == 'team'
+        operation = sessions.use.call_args.args[1]
+        with patch('app.teams_preview.channels', return_value=[]) as channels:
+            assert operation('token') == []
+            channels.assert_called_once_with('token', 'abc')
+        response, data = request(client, 'POST', '/api/teams/start', headers={**post, **cookie})
+        assert response.status == 409 and json.loads(data) == {'error': 'Disconnect the existing connection first.'}
+        response, data = request(client, 'POST', '/api/teams/disconnect', headers={**post, **cookie})
+        assert response.status == 200 and json.loads(data) == {'connected': False}
+        sessions.disconnect.assert_called_once_with('cookie-value')
+
+
+def test_teams_rejects_invalid_requests_and_reports_failures(client):
+    host = {'Host': '127.0.0.1:8765'}
+    post = {**host, 'Origin': 'http://127.0.0.1:8765'}
+    for path in ('/oauth/teams/callback?state=s&code=c', '/api/teams/status', '/api/teams/list', '/api/teams/channels'):
+        response, data = request(client, 'GET', path, headers={'Host': 'evil.example'})
+        assert response.status == 403 and json.loads(data) == {'error': 'Invalid host'}
+    for path in ('/api/teams/start', '/api/teams/disconnect'):
+        response, data = request(client, 'POST', path, headers={**host, 'Origin': 'https://evil.example'})
+        assert response.status == 403 and json.loads(data) == {'error': 'Invalid origin'}
+    for query in ('', '?state=s', '?state=s&state=t&code=c', '?error=access_denied&state=s'):
+        response, data = request(client, 'GET', '/oauth/teams/callback' + query, headers=host)
+        assert response.status == 400 and json.loads(data) == {'error': 'Invalid callback'}
+    with patch('app.TEAMS_SESSIONS') as sessions:
+        sessions.complete.side_effect = ValueError('private details')
+        response, data = request(client, 'GET', '/oauth/teams/callback?state=s&code=c', headers=host)
+        assert response.status == 400 and json.loads(data) == {'error': 'Invalid or expired authorization'}
+        sessions.complete.side_effect = OSError('private details')
+        response, data = request(client, 'GET', '/oauth/teams/callback?state=s&code=c', headers=host)
+        assert response.status == 502 and json.loads(data) == {'error': 'Authorization failed'}
+        sessions.connected.return_value = False
+        with patch.dict('os.environ', {}, clear=True):
+            response, data = request(client, 'POST', '/api/teams/start', headers=post)
+            assert response.status == 503 and json.loads(data) == {'error': 'Set TEAMS_CLIENT_ID to your Entra app client ID.'}
+        sessions.disconnect.side_effect = ValueError('private details')
+        response, data = request(client, 'POST', '/api/teams/disconnect', headers=post)
+        assert response.status == 404 and json.loads(data) == {'error': 'No connection'}
+        sessions.disconnect.side_effect = OSError('private details')
+        response, data = request(client, 'POST', '/api/teams/disconnect', headers=post)
+        assert response.status == 502 and json.loads(data) == {'error': 'Unable to manage Teams connection'}
+        sessions.use.side_effect = ValueError('private details')
+        response, data = request(client, 'GET', '/api/teams/list', headers=host)
+        assert response.status == 400 and json.loads(data) == {'error': 'Teams preview unavailable'}
+        sessions.use.side_effect = OSError('private details')
+        response, data = request(client, 'GET', '/api/teams/channels', headers=host)
+        assert response.status == 502 and json.loads(data) == {'error': 'Unable to load Teams data'}

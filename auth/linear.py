@@ -32,7 +32,10 @@ class Authorization:
             if self._used or time.monotonic() >= self._expires or not isinstance(state, str) or not state.isascii() or not secrets.compare_digest(self._state, state) or not isinstance(code, str) or not code:
                 raise ValueError('Invalid or expired authorization')
             self._used = True
-        return _token({'grant_type': 'authorization_code', 'client_id': self.client_id, 'redirect_uri': self.redirect_uri, 'code': code, 'code_verifier': self._verifier})
+        return self._token({'grant_type': 'authorization_code', 'client_id': self.client_id, 'redirect_uri': self.redirect_uri, 'code': code, 'code_verifier': self._verifier})
+
+    def _token(self, fields):
+        return _token(fields)
 
 
 def refresh(client_id, refresh_token):
