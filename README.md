@@ -42,6 +42,8 @@ Linear OAuth 2.0 PKCE 연결을 로컬에서 시험할 수 있습니다. Linear�
 
 Microsoft Teams는 로컬에서 Entra 공개 클라이언트의 OAuth PKCE로 연결하고 팀 및 채널 목록의 첫 페이지만 브라우저에서 미리 볼 수 있습니다. Microsoft Entra 앱 등록에서 모바일 및 데스크톱 공개 클라이언트를 설정하고, 조직 계정용 위임 권한 `Team.ReadBasic.All`, `Channel.ReadBasic.All`과 `offline_access`에 동의해야 합니다. 리디렉션 URI `http://127.0.0.1:8765/oauth/teams/callback`은 앱 매니페스트에서 등록하고 공개 클라이언트 ID를 `TEAMS_CLIENT_ID`로 설정하세요. 조직 정책에 따라 관리자 동의가 필요할 수 있습니다. 공유 채널의 호스트 팀은 이 목록에 포함되지 않을 수 있습니다. 메시지 수집, 페이지 전체 조회, 원본 권한 동기화는 지원하지 않습니다. Linear와 마찬가지로 실제 조직 토큰은 로컬 에뮬레이터에 저장하지 마세요.
 
+GitLab.com 비공개 프로젝트는 공개 OAuth 앱의 PKCE 연결 후 현재 사용자의 접근 권한으로 MR 최대 30개를 미리 볼 수 있습니다. GitLab OAuth 앱에서 `Confidential` 설정을 끄고 `read_api` 권한과 리디렉션 URI `http://127.0.0.1:8765/oauth/gitlab/callback`을 등록한 뒤 앱 ID를 `GITLAB_CLIENT_ID`로 설정하세요. 미리보기는 저장·공유되지 않습니다. 연결 해제는 로컬 토큰을 삭제하며 GitLab의 앱 승인 철회는 별도로 해야 합니다. 현재 자체 호스팅 GitLab과 비공개 자료의 공유 수집은 지원하지 않습니다. 실제 조직 토큰은 LocalStack에 저장하지 마세요.
+
 ## 다음 단계
 
 - GitHub App 인증과 비공개 저장소 접근, 변경분 동기화

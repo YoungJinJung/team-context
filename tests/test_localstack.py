@@ -226,3 +226,26 @@ def test_teams_session_is_isolated_from_linear_session():
     assert not teams_sessions.connected(cookie)
     from botocore.exceptions import ClientError
     with pytest.raises(ClientError): vault.read(secret)
+
+
+def test_gitlab_session_remains_private_and_isolated():
+    from unittest.mock import patch
+    from urllib.parse import parse_qs, urlsplit
+    from auth import gitlab, teams, vault
+    from auth.sessions import Sessions
+    initialize()
+    gitlab_sessions = Sessions(gitlab.Authorization, gitlab.refresh, 'gitlab')
+    cookie, url = gitlab_sessions.start('client', gitlab.CALLBACK)
+    state = parse_qs(urlsplit(url).query)['state'][0]
+    with patch('auth.gitlab._token', return_value={'access_token':'example-access', 'refresh_token':'example-refresh'}):
+        secret = gitlab_sessions.complete(cookie, state, 'code')
+    try:
+        assert gitlab_sessions.connected(cookie)
+        assert Sessions(gitlab.Authorization, gitlab.refresh, 'gitlab').connected(cookie)
+        assert not Sessions().connected(cookie)
+        assert not Sessions(teams.Authorization, teams.refresh, 'teams').connected(cookie)
+        assert gitlab_sessions.use(cookie, lambda token: token) == 'example-access'
+    finally:
+        gitlab_sessions.disconnect(cookie)
+    from botocore.exceptions import ClientError
+    with pytest.raises(ClientError): vault.read(secret)

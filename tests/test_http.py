@@ -427,3 +427,84 @@ def test_teams_rejects_invalid_requests_and_reports_failures(client):
         sessions.use.side_effect = OSError('private details')
         response, data = request(client, 'GET', '/api/teams/channels', headers=host)
         assert response.status == 502 and json.loads(data) == {'error': 'Unable to load Teams data'}
+
+
+def test_gitlab_oauth_and_private_preview_routes(client):
+    host = {'Host':'127.0.0.1:8765'}
+    post = {**host, 'Origin':'http://127.0.0.1:8765'}
+    cookie = {**host, 'Cookie':'team_context_gitlab_session=gitlab-cookie; team_context_session=linear'}
+    with patch('app.GITLAB_SESSIONS') as sessions, patch.dict('os.environ', {'GITLAB_CLIENT_ID':'client'}):
+        sessions.connected.return_value = False
+        sessions.start.return_value = ('gitlab-cookie', 'https://gitlab.com/oauth/authorize')
+        response, data = request(client, 'POST', '/api/gitlab/start', headers=post)
+        assert response.status == 200 and json.loads(data) == {'url':'https://gitlab.com/oauth/authorize'}
+        assert response.getheader('Set-Cookie') == 'team_context_gitlab_session=gitlab-cookie; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000'
+        assert response.getheader('Cache-Control') == 'no-store'
+        sessions.start.assert_called_once_with('client', app.gitlab.CALLBACK)
+        response, _ = request(client, 'GET', '/oauth/gitlab/callback?state=s&code=c', headers=cookie)
+        assert response.status == 303 and response.getheader('Location') == '/'
+        assert response.getheader('Cache-Control') == 'no-store' and response.getheader('Content-Length') == '0'
+        sessions.complete.assert_called_once_with('gitlab-cookie', 's', 'c')
+        sessions.connected.return_value = True
+        response, data = request(client, 'GET', '/api/gitlab/status', headers=cookie)
+        assert response.status == 200 and json.loads(data) == {'connected': True}
+        sessions.use.return_value = [{'title':'private','url':'https://gitlab.com/a/b'}]
+        response, data = request(client, 'GET', '/api/gitlab/preview?project=a%2Fb', headers=cookie)
+        assert response.status == 200 and json.loads(data) == {'items':[{'title':'private','url':'https://gitlab.com/a/b'}]}
+        assert response.getheader('Cache-Control') == 'no-store'
+        operation = sessions.use.call_args.args[1]
+        assert sessions.use.call_args.args[0] == 'gitlab-cookie'
+        with patch('app.gitlab_preview.merge_requests', return_value=[]) as preview:
+            assert operation('token') == []
+            preview.assert_called_once_with('token', 'a/b')
+        response, data = request(client, 'POST', '/api/gitlab/start', headers={**post, **cookie})
+        assert response.status == 409 and json.loads(data) == {'error':'Disconnect the existing connection first.'}
+        response, data = request(client, 'POST', '/api/gitlab/disconnect', headers={**post, **cookie})
+        assert response.status == 200 and json.loads(data) == {'connected':False}
+        sessions.disconnect.assert_called_once_with('gitlab-cookie')
+
+
+def test_gitlab_oauth_rejects_invalid_requests_and_hides_errors(client):
+    host = {'Host':'127.0.0.1:8765'}
+    post = {**host, 'Origin':'http://127.0.0.1:8765'}
+    for path in ('/oauth/gitlab/callback?state=s&code=c', '/api/gitlab/status', '/api/gitlab/preview'):
+        response, data = request(client, 'GET', path, headers={'Host':'evil.example'})
+        assert response.status == 403 and json.loads(data) == {'error':'Invalid host'}
+    for path in ('/api/gitlab/start', '/api/gitlab/disconnect'):
+        response, data = request(client, 'POST', path, headers={**host, 'Origin':'https://evil.example'})
+        assert response.status == 403 and json.loads(data) == {'error':'Invalid origin'}
+    for query in ('', '?state=s', '?state=s&state=t&code=c', '?error=access_denied&state=s'):
+        response, data = request(client, 'GET', '/oauth/gitlab/callback' + query, headers=host)
+        assert response.status == 400 and json.loads(data) == {'error':'Invalid callback'}
+    with patch('app.GITLAB_SESSIONS') as sessions:
+        sessions.complete.side_effect = ValueError('private')
+        response, data = request(client, 'GET', '/oauth/gitlab/callback?state=s&code=c', headers=host)
+        assert response.status == 400 and json.loads(data) == {'error':'Invalid or expired authorization'}
+        sessions.complete.side_effect = OSError('private')
+        response, data = request(client, 'GET', '/oauth/gitlab/callback?state=s&code=c', headers=host)
+        assert response.status == 502 and json.loads(data) == {'error':'Authorization failed'}
+        sessions.connected.return_value = False
+        with patch.dict('os.environ', {}, clear=True):
+            response, data = request(client, 'POST', '/api/gitlab/start', headers=post)
+            assert response.status == 503 and json.loads(data) == {'error':'Set GITLAB_CLIENT_ID to your GitLab OAuth app ID.'}
+        sessions.disconnect.side_effect = ValueError('private')
+        response, data = request(client, 'POST', '/api/gitlab/disconnect', headers=post)
+        assert response.status == 404 and json.loads(data) == {'error':'No connection'}
+        sessions.disconnect.side_effect = OSError('private')
+        response, data = request(client, 'POST', '/api/gitlab/disconnect', headers=post)
+        assert response.status == 502 and json.loads(data) == {'error':'Unable to manage GitLab connection'}
+        sessions.use.side_effect = ValueError('private')
+        response, data = request(client, 'GET', '/api/gitlab/preview', headers=host)
+        assert response.status == 400 and json.loads(data) == {'error':'GitLab preview unavailable'}
+        sessions.use.side_effect = OSError('private')
+        response, data = request(client, 'GET', '/api/gitlab/preview', headers=host)
+        assert response.status == 502 and json.loads(data) == {'error':'Unable to load GitLab data'}
+
+
+def test_gitlab_preview_never_persists_private_data(client):
+    headers = {'Host':'127.0.0.1:8765', 'Cookie':'team_context_gitlab_session=gitlab-cookie'}
+    with patch('app.GITLAB_SESSIONS.use', return_value=[{'title':'private','url':'https://gitlab.com/a/b'}]), patch('app.persist') as persist, patch('app.search') as search:
+        response, data = request(client, 'GET', '/api/gitlab/preview?project=a%2Fb', headers=headers)
+    assert response.status == 200 and json.loads(data)['items'][0]['title'] == 'private'
+    persist.assert_not_called()
+    search.assert_not_called()
