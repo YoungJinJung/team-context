@@ -43,7 +43,7 @@ def test_post_success(client):
     with patch('connectors.github.collect', return_value=[{'id': 'abc'}]), patch('app.persist') as persist:
         response, data = request(client, 'POST', '/api/collect', body)
     assert response.status == 200 and json.loads(data) == {'records': [{'id': 'abc'}]}
-    persist.assert_called_once_with('github', {'repository': 'a/b'}, [{'id': 'abc'}])
+    persist.assert_called_once_with('github:a/b', [{'id': 'abc'}])
 
 
 def test_post_failures(client):
@@ -52,7 +52,7 @@ def test_post_failures(client):
         response, data = request(client, 'POST', path, body, headers)
         assert response.status == status and 'error' in json.loads(data)
     with patch('connectors.github.collect', side_effect=OSError('failure')):
-        response, data = request(client, 'POST', '/api/collect', json.dumps({'connector': 'github', 'config': {}}))
+        response, data = request(client, 'POST', '/api/collect', json.dumps({'connector': 'github', 'config': {'repository': 'a/b'}}))
     assert response.status == 502 and 'error' in json.loads(data)
 
 
@@ -75,8 +75,8 @@ def test_response_headers_and_error_messages(client):
     response, data = request(client, 'POST', '/api/collect', json.dumps({'connector': 'missing', 'config': {}}))
     assert response.status == 400 and json.loads(data) == {'error': 'Invalid connector or configuration'}
     with patch('connectors.github.collect', side_effect=OSError('failure')):
-        response, data = request(client, 'POST', '/api/collect', json.dumps({'connector': 'github', 'config': {}}))
-    assert response.status == 502 and json.loads(data) == {'error': 'Unable to fetch or store data. Check GitHub and the local AWS emulator.'}
+        response, data = request(client, 'POST', '/api/collect', json.dumps({'connector': 'github', 'config': {'repository': 'a/b'}}))
+    assert response.status == 502 and json.loads(data) == {'error': 'Unable to fetch or store data. Check the source service and local AWS emulator.'}
 
 
 def test_allowed_origins_and_connector_config(client):
@@ -102,9 +102,19 @@ def test_post_missing_route_message(client):
 
 def test_request_size_boundaries(client):
     # Exactly 4096 bytes is permitted, 4097 is not.
-    payload = json.dumps({'connector': 'github', 'config': {}})
+    payload = json.dumps({'connector': 'github', 'config': {'repository': 'a/b'}})
     with patch('connectors.github.collect', return_value=[]), patch('app.persist'):
         response, _ = request(client, 'POST', '/api/collect', payload.ljust(4096))
     assert response.status == 200
     response, data = request(client, 'POST', '/api/collect', payload.ljust(4097))
     assert response.status == 400 and json.loads(data)['error'] == 'Invalid request size'
+
+
+def test_another_connector_can_persist_without_repository(client):
+    from types import SimpleNamespace
+    module = SimpleNamespace(collect=lambda config: [{'id': 'example:one'}], connection_id=lambda config: 'example:' + config['space'])
+    body = json.dumps({'connector': 'example', 'config': {'space': 'one'}})
+    with patch('app.discover', return_value={'example': module}), patch('app.persist') as persist:
+        response, data = request(client, 'POST', '/api/collect', body)
+    assert response.status == 200 and json.loads(data)['records'] == [{'id': 'example:one'}]
+    persist.assert_called_once_with('example:one', [{'id': 'example:one'}])

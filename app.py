@@ -55,12 +55,12 @@ class Handler(BaseHTTPRequestHandler):
             if module is None or not isinstance(payload.get("config"), dict):
                 raise ValueError("Invalid connector or configuration")
             records = module.collect(payload["config"])
-            persist(payload["connector"], payload["config"], records)
+            persist(module.connection_id(payload["config"]), records)
             self.send(200, {"records": records})
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self.send(400, {"error": str(exc)})
         except (urllib.error.URLError, TimeoutError, OSError, BotoCoreError, ClientError):
-            self.send(502, {"error": "Unable to fetch or store data. Check GitHub and the local AWS emulator."})
+            self.send(502, {"error": "Unable to fetch or store data. Check the source service and local AWS emulator."})
 
 
 if __name__ == "__main__":

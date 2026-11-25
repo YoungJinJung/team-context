@@ -17,7 +17,7 @@ def test_persist_writes_records_before_status():
     s3, db = Mock(), Mock()
     record = {'id': 'github:a/b:pr:1', 'title': '한글'}
     with patch('storage.clients', return_value=(s3, db)):
-        storage.persist('github', {'repository': 'A/B'}, [record])
+        storage.persist('github:a/b', [record])
     args = s3.put_object.call_args.kwargs
     assert args['Bucket'] == 'team-context-records'
     assert args['Key'] == hashlib.sha256(record['id'].encode()).hexdigest() + '.json'
@@ -31,7 +31,7 @@ def test_persist_does_not_advance_after_failed_write():
     s3.put_object.side_effect = OSError('failed')
     with patch('storage.clients', return_value=(s3, db)):
         try:
-            storage.persist('github', {'repository': 'a/b'}, [{'id': 'x'}])
+            storage.persist('github:a/b', [{'id': 'x'}])
             assert False
         except OSError:
             pass
@@ -85,7 +85,7 @@ def test_both_clients_receive_endpoint_configuration():
 def test_zero_records_updates_count():
     s3, db = Mock(), Mock()
     with patch('storage.clients', return_value=(s3, db)):
-        storage.persist('github', {'repository': 'a/b'}, [])
+        storage.persist('github:a/b', [])
     s3.put_object.assert_not_called()
     assert db.put_item.call_args.kwargs['Item']['count'] == {'N': '0'}
 

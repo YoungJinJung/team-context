@@ -47,3 +47,7 @@ class ConnectorContractTest(unittest.TestCase):
     def test_missing_repository(self):
         with self.assertRaisesRegex(ValueError, 'owner/name'):
             github.collect({})
+
+
+def test_connection_id_is_stable_and_namespaced():
+    assert github.connection_id({'repository': 'Owner/Repo'}) == 'github:owner/repo'

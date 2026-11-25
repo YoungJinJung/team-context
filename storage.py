@@ -9,10 +9,8 @@ def clients():
     return boto3.client('s3', **options), boto3.client('dynamodb', **options)
 
 
-def persist(connector, config, records):
+def persist(connection, records):
     s3, dynamodb = clients()
-    repository = config['repository'].lower()
-    connection = connector + ':' + repository
     for record in records:
         key = hashlib.sha256(record['id'].encode()).hexdigest() + '.json'
         s3.put_object(Bucket='team-context-records', Key=key, Body=json.dumps(record, ensure_ascii=False).encode(), ContentType='application/json')
