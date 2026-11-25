@@ -28,6 +28,8 @@ def search(query):
     pages = s3.get_paginator('list_objects_v2').paginate(Bucket='team-context-records')
     for page in pages:
         for item in page.get('Contents', []):
+            if item['Key'].startswith('private/'):
+                continue
             body = s3.get_object(Bucket='team-context-records', Key=item['Key'])['Body'].read()
             record = json.loads(body)
             if record.get('visibility') != 'public':
@@ -50,6 +52,8 @@ def remove_public_source(connection):
     for page in s3.get_paginator('list_objects_v2').paginate(Bucket='team-context-records'):
         for item in page.get('Contents', []):
             key = item['Key']
+            if key.startswith('private/'):
+                continue
             record = json.loads(s3.get_object(Bucket='team-context-records', Key=key)['Body'].read())
             if not isinstance(record, dict):
                 continue
@@ -68,6 +72,8 @@ def cleanup_unavailable():
     for page in s3.get_paginator('list_objects_v2').paginate(Bucket='team-context-records'):
         for item in page.get('Contents', []):
             key = item['Key']
+            if key.startswith('private/'):
+                continue
             record = json.loads(s3.get_object(Bucket='team-context-records', Key=key)['Body'].read())
             record_id = record.get('id')
             if record.get('visibility') != 'public' or not isinstance(record_id, str):

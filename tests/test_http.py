@@ -599,3 +599,40 @@ def test_github_start_requires_both_app_settings(client):
             response, data = request(client, 'POST', '/api/github/start', headers=headers)
             assert response.status == 503 and json.loads(data) == {'error':'Set GITHUB_CLIENT_ID and GITHUB_APP_SECRET_ID.'}
             sessions.start.assert_not_called()
+
+
+def test_private_gitlab_collection_and_search_are_session_bound(client):
+    host={'Host':'127.0.0.1:8765', 'Cookie':'team_context_gitlab_session=gitlab-cookie'}
+    post={**host, 'Origin':'http://127.0.0.1:8765'}
+    with patch('app.GITLAB_SESSIONS.use') as use, patch('app.gitlab_private.collect', return_value=2) as collect, patch('app.gitlab_private.search', return_value=[{'title':'secret'}]) as search:
+        use.side_effect=lambda session, operation: operation('viewer-token')
+        response,data=request(client,'POST','/api/gitlab/private/collect',json.dumps({'project':'a/b'}),post)
+        assert response.status == 200 and json.loads(data) == {'count':2}
+        assert response.getheader('Cache-Control') == 'no-store'
+        collect.assert_called_once_with('viewer-token','a/b')
+        assert use.call_args.args[0] == 'gitlab-cookie'
+        response,data=request(client,'GET','/api/gitlab/private/search?project=a%2Fb&q=secret',headers=host)
+        assert response.status == 200 and json.loads(data) == {'items':[{'title':'secret'}]}
+        assert response.getheader('Cache-Control') == 'no-store'
+        search.assert_called_once_with('viewer-token','a/b','secret')
+        assert use.call_args.args[0] == 'gitlab-cookie'
+
+
+def test_private_gitlab_rejects_bad_request_and_hides_errors(client):
+    host={'Host':'127.0.0.1:8765'}
+    post={**host, 'Origin':'http://127.0.0.1:8765'}
+    for method,path,headers in [('GET','/api/gitlab/private/search',{'Host':'evil.example'}),('POST','/api/gitlab/private/collect',{**host,'Origin':'https://evil.example'})]:
+        response,data=request(client,method,path,headers=headers)
+        assert response.status == 403 and 'error' in json.loads(data)
+    for body in ('', '{', '[]', '{}', json.dumps({'project':1}), 'x'*4097):
+        response,data=request(client,'POST','/api/gitlab/private/collect',body,post)
+        assert response.status == 400 and json.loads(data) == {'error':'Private collection unavailable'}
+    with patch('app.GITLAB_SESSIONS.use') as use:
+        for error,code,message in [(ValueError('secret'),400,'Private collection unavailable'),(OSError('secret'),502,'Unable to collect private data')]:
+            use.side_effect=error
+            response,data=request(client,'POST','/api/gitlab/private/collect',json.dumps({'project':'a/b'}),post)
+            assert response.status == code and json.loads(data) == {'error':message}
+        for error,code,message in [(ValueError('secret'),400,'Private search unavailable'),(OSError('secret'),502,'Unable to search private data')]:
+            use.side_effect=error
+            response,data=request(client,'GET','/api/gitlab/private/search?project=a%2Fb&q=secret',headers=host)
+            assert response.status == code and json.loads(data) == {'error':message}

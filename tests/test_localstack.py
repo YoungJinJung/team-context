@@ -300,3 +300,63 @@ def test_public_source_removal_preserves_nonpublic_records():
     finally:
         for key in keys: s3.delete_object(Bucket='team-context-records', Key=key)
         db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S':'github:local/boundary'}})
+
+
+def test_private_gitlab_snapshot_requires_current_requester_access():
+    from unittest.mock import patch
+    from urllib.error import HTTPError
+    from auth import gitlab_private
+    import storage
+    import uuid
+    initialize()
+    project_id = uuid.uuid4().int % 1000000000000000000 + 1
+    project = f'local-test-{uuid.uuid4().hex}/fixture'
+    encoded_project = project.replace('/', '%2F')
+    record = {'iid':1, 'project_id':project_id, 'title':'local private phrase', 'web_url':'https://gitlab.com/a/b/-/merge_requests/1', 'updated_at':'2026-01-01', 'description':'local private body'}
+    state = {'allowed':True, 'title':record['title']}
+    def provider(token, path):
+        if token != 'allowed' or not state['allowed']:
+            raise HTTPError('https://gitlab.com', 403, 'denied', {}, None)
+        if path == 'projects/' + encoded_project: return {'id':project_id}
+        if path.endswith('?scope=all&per_page=100&page=1'): return [record]
+        if path.endswith('?scope=all&per_page=100&page=2'): return []
+        if path.endswith('/merge_requests/1'): return {**record, 'title':state['title']}
+        raise AssertionError(path)
+    s3,_ = clients()
+    try:
+        with patch('auth.gitlab_private._get', side_effect=provider):
+            assert gitlab_private.collect('allowed',project) == 1
+            assert gitlab_private.search('allowed',project,'private phrase')[0]['title'] == record['title']
+            with pytest.raises(HTTPError): gitlab_private.search('other',project,'private phrase')
+            state['allowed']=False
+            with pytest.raises(HTTPError): gitlab_private.search('allowed',project,'private phrase')
+            state['allowed']=True
+            state['title']='changed'
+            assert gitlab_private.search('allowed',project,'private phrase') == []
+        assert storage.search('local private phrase') == []
+        assert storage.remove_public_source('gitlab:' + project) == 0
+        assert json.loads(s3.get_object(Bucket='team-context-records',Key=f'private/gitlab/{project_id}.json')['Body'].read())['visibility'] == 'private'
+    finally:
+        s3.delete_object(Bucket='team-context-records',Key=f'private/gitlab/{project_id}.json')
+
+
+def test_failed_private_collection_preserves_previous_snapshot():
+    from unittest.mock import patch
+    from urllib.error import HTTPError
+    from auth import gitlab_private
+    import uuid
+    initialize()
+    project_id=uuid.uuid4().int % 1000000000000000000 + 1
+    first={'iid':1,'project_id':project_id,'title':'previous','web_url':'https://gitlab.com/a/b/-/merge_requests/1','updated_at':'2026-01-01','description':'body'}
+    full=[{**first,'iid':n} for n in range(1,101)]
+    s3,_=clients()
+    key=f'private/gitlab/{project_id}.json'
+    try:
+        with patch('auth.gitlab_private._get', side_effect=[{'id':project_id},[first],[]]):
+            assert gitlab_private.collect('viewer','a/b') == 1
+        before=s3.get_object(Bucket='team-context-records',Key=key)['Body'].read()
+        with patch('auth.gitlab_private._get', side_effect=[{'id':project_id},full,HTTPError('https://gitlab.com',500,'failed',{},None)]):
+            with pytest.raises(HTTPError): gitlab_private.collect('viewer','a/b')
+        assert s3.get_object(Bucket='team-context-records',Key=key)['Body'].read() == before
+    finally:
+        s3.delete_object(Bucket='team-context-records',Key=key)
