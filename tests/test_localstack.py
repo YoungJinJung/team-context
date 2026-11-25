@@ -50,6 +50,12 @@ def test_browser_session_with_real_local_secrets_manager():
     try:
         assert vault.read(secret_id) == pair
         assert sessions.connected(cookie)
+        assert Sessions().connected(cookie)
+        _, db = clients()
+        key = 'session:' + hashlib.sha256(cookie.encode()).hexdigest()
+        entry = db.get_item(TableName='team-context-sync', Key={'connection_id': {'S': key}}, ConsistentRead=True)['Item']
+        assert entry['secret_id']['S'] == secret_id
+        assert cookie not in str(entry) and 'local-example-access' not in str(entry)
         with pytest.raises(ValueError): sessions.complete(cookie, state, 'one-time-code')
     finally:
         sessions.disconnect(cookie)
@@ -72,3 +78,15 @@ def test_search_returns_public_records_from_s3():
             key = hashlib.sha256(record['id'].encode()).hexdigest() + '.json'
             s3.delete_object(Bucket='team-context-records', Key=key)
         db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': 'search:test'}})
+
+
+def test_disconnect_recovers_after_secret_already_deleted():
+    from auth.sessions import Sessions
+    from auth import session_store, vault
+    sessions = Sessions()
+    session = 'a' * 43
+    secret = vault.create({'access_token': 'local-only'})
+    session_store.put(session, secret)
+    vault.delete(secret)
+    sessions.disconnect(session)
+    assert not sessions.connected(session)

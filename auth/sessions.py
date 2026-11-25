@@ -4,14 +4,13 @@ import threading
 import time
 
 from auth.linear import Authorization
-from auth import vault
+from auth import vault, session_store
 
 
 class Sessions:
     def __init__(self):
         self._items = {}
         self._lock = threading.Lock()
-        self._completed = {}
 
     def start(self, client_id, redirect_uri):
         session = secrets.token_urlsafe(32)
@@ -29,18 +28,21 @@ class Sessions:
             raise ValueError('Invalid or expired session')
         tokens = entry[0].exchange(state, code)
         secret_id = vault.create(tokens)
-        with self._lock:
-            self._completed[session] = secret_id
+        try:
+            session_store.put(session, secret_id)
+        except Exception:
+            vault.delete(secret_id)
+            raise
         return secret_id
 
     def connected(self, session):
         with self._lock:
-            return session in self._completed
+            return session_store.get(session) is not None
 
     def disconnect(self, session):
         with self._lock:
-            secret_id = self._completed.get(session)
+            secret_id = session_store.get(session)
             if secret_id is None:
                 raise ValueError('No connection')
             vault.delete(secret_id)
-            del self._completed[session]
+            session_store.remove(session)

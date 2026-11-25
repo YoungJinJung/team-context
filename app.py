@@ -82,7 +82,10 @@ class Handler(BaseHTTPRequestHandler):
             except (OSError, BotoCoreError, ClientError):
                 return self.send(502, {"error": "Unable to search local storage."})
         if self.path == "/api/linear/status":
-            return self.send(200, {"connected": SESSIONS.connected(self.cookie())})
+            try:
+                return self.send(200, {"connected": SESSIONS.connected(self.cookie())})
+            except (OSError, BotoCoreError, ClientError):
+                return self.send(502, {"error": "Unable to read connection status"})
         if self.path == "/":
             return self.send(200, (ROOT / "index.html").read_bytes(), "text/html; charset=utf-8")
         if self.path == "/api/connectors":
@@ -103,8 +106,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/linear/start":
             if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid origin"})
-            if SESSIONS.connected(self.cookie()):
-                return self.send(409, {"error": "Disconnect the existing connection first."})
+            try:
+                if SESSIONS.connected(self.cookie()):
+                    return self.send(409, {"error": "Disconnect the existing connection first."})
+            except (OSError, BotoCoreError, ClientError):
+                return self.send(502, {"error": "Unable to read connection status"})
             client_id = os.environ.get("LINEAR_CLIENT_ID")
             if not client_id:
                 return self.send(503, {"error": "Set LINEAR_CLIENT_ID to your Linear OAuth app client ID."})
@@ -113,7 +119,7 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Set-Cookie", "team_context_session=" + session + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=600")
+            self.send_header("Set-Cookie", "team_context_session=" + session + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000")
             self.send_header("Content-Length", str(len(body)))
             self.end_headers()
             self.wfile.write(body)

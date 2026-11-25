@@ -3,6 +3,7 @@ import json
 import re
 import secrets
 import boto3
+from botocore.exceptions import ClientError
 
 
 def client():
@@ -30,4 +31,8 @@ def replace(secret_id, tokens):
 
 
 def delete(secret_id):
-    client().delete_secret(SecretId=_name(secret_id), ForceDeleteWithoutRecovery=True)
+    try:
+        client().delete_secret(SecretId=_name(secret_id), ForceDeleteWithoutRecovery=True)
+    except ClientError as error:
+        if error.response['Error']['Code'] != 'ResourceNotFoundException':
+            raise

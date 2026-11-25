@@ -135,7 +135,7 @@ def test_linear_authorization_and_safe_callback_logging(client, capsys):
         assert json.loads(data) == {'url': 'https://linear.app/oauth/authorize?state=state'}
         assert response.getheader('Cache-Control') == 'no-store'
         cookie = response.getheader('Set-Cookie')
-        assert cookie == 'team_context_session=safe-cookie; HttpOnly; SameSite=Lax; Path=/; Max-Age=600'
+        assert cookie == 'team_context_session=safe-cookie; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000'
         sessions.start.assert_called_once_with('public-id', app.CALLBACK)
         response, data = request(client, 'GET', '/oauth/linear/callback?code=private-code&state=state', headers={'Host': '127.0.0.1:8765', 'Cookie': cookie})
         assert response.status == 303 and response.getheader('Location') == '/'
@@ -175,7 +175,7 @@ def test_linear_full_flow_uses_session_and_never_returns_tokens(client):
     sessions = Sessions()
     headers = {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'}
     tokens = {'access_token': 'private-access', 'refresh_token': 'private-refresh'}
-    with patch('app.SESSIONS', sessions), patch.dict('os.environ', {'LINEAR_CLIENT_ID': 'public-id'}), patch('auth.linear._token', return_value=tokens) as exchange, patch('auth.sessions.vault.create', return_value='private-secret-id') as store:
+    with patch('app.SESSIONS', sessions), patch.dict('os.environ', {'LINEAR_CLIENT_ID': 'public-id'}), patch('auth.linear._token', return_value=tokens) as exchange, patch('auth.sessions.vault.create', return_value='private-secret-id') as store, patch('auth.sessions.session_store.put'), patch('auth.sessions.session_store.get', side_effect=[None, None, 'private-secret-id']):
         response, body = request(client, 'POST', '/api/linear/start', '', headers)
         cookie = response.getheader('Set-Cookie').split(';', 1)[0]
         state = parse_qs(urlsplit(json.loads(body)['url']).query)['state'][0]
@@ -243,3 +243,15 @@ def test_search_http_api(client):
     with patch('app.search', side_effect=OSError('private error')):
         response, body = request(client, 'GET', '/api/search?q=word')
     assert response.status == 502 and json.loads(body) == {'error': 'Unable to search local storage.'}
+
+
+def test_linear_connection_store_failure_returns_safe_error(client):
+    for method, path, headers in [
+        ('GET', '/api/linear/status', {}),
+        ('POST', '/api/linear/start', {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'}),
+    ]:
+        with patch('app.SESSIONS.connected', side_effect=OSError('secret-details')):
+            response, data = request(client, method, path, '' if method == 'POST' else None, headers)
+        assert response.status == 502
+        assert json.loads(data) == {'error': 'Unable to read connection status'}
+        assert b'secret-details' not in data
