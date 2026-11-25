@@ -51,8 +51,10 @@ def remove_public_source(connection):
         for item in page.get('Contents', []):
             key = item['Key']
             record = json.loads(s3.get_object(Bucket='team-context-records', Key=key)['Body'].read())
+            if not isinstance(record, dict):
+                continue
             record_id = record.get('id')
-            if isinstance(record_id, str) and pattern.fullmatch(record_id) and key == hashlib.sha256(record_id.encode()).hexdigest() + '.json':
+            if record.get('visibility') == 'public' and isinstance(record_id, str) and pattern.fullmatch(record_id) and key == hashlib.sha256(record_id.encode()).hexdigest() + '.json':
                 keys.append(key)
     for key in keys:
         s3.delete_object(Bucket='team-context-records', Key=key)
