@@ -2,6 +2,7 @@
 import json
 import re
 import urllib.request
+from auth.transport import open_url
 
 MANIFEST = {"id": "github", "name": "GitHub", "category": "source_code", "fields": [{"name": "repository", "label": "Repository (owner/name)", "required": True}]}
 
@@ -16,8 +17,21 @@ def connection_id(config):
 def collect(config):
     connection_id(config)
     repository = config["repository"]
-    url = f"https://api.github.com/repos/{repository}/pulls?state=all&per_page=30"
-    request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "team-context-mvp"})
-    with urllib.request.urlopen(request, timeout=15) as response:
-        pulls = json.load(response)
-    return [{"id": f"github:{repository.lower()}:pr:{p['number']}", "visibility": "public", "type": "pull_request", "title": p["title"], "url": p["html_url"], "updated_at": p["updated_at"], "body": p.get("body") or ""} for p in pulls]
+    pulls = []
+    seen = set()
+    for page in range(1, 101):
+        url = f"https://api.github.com/repos/{repository}/pulls?state=all&per_page=100&page={page}"
+        request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "team-context-mvp"})
+        with open_url(request) as response:
+            batch = json.load(response)
+        if not isinstance(batch, list) or len(batch) > 100:
+            raise ValueError("Invalid GitHub page")
+        for pull in batch:
+            number = pull['number']
+            if number in seen:
+                raise ValueError("Repeated GitHub pull request")
+            seen.add(number)
+        pulls.extend(batch)
+        if len(batch) < 100:
+            return [{"id": f"github:{repository.lower()}:pr:{p['number']}", "visibility": "public", "type": "pull_request", "title": p["title"], "url": p["html_url"], "updated_at": p["updated_at"], "body": p.get("body") or ""} for p in pulls]
+    raise ValueError("GitHub collection exceeds 100 pages")
