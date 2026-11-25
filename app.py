@@ -12,12 +12,13 @@ from pathlib import Path
 import connectors
 from storage import persist, search, remove_public_source, cleanup_unavailable, list_public_sources
 from auth.sessions import Sessions
-from auth import linear_preview, teams, teams_preview
+from auth import linear_preview, teams, teams_preview, gitlab, gitlab_preview
 from botocore.exceptions import BotoCoreError, ClientError
 
 ROOT = Path(__file__).parent
 SESSIONS = Sessions()
 TEAMS_SESSIONS = Sessions(teams.Authorization, teams.refresh, "teams")
+GITLAB_SESSIONS = Sessions(gitlab.Authorization, gitlab.refresh, "gitlab")
 STORAGE_LOCK = threading.Lock()
 CALLBACK = "http://127.0.0.1:8765/oauth/linear/callback"
 TEAMS_CALLBACK = "http://127.0.0.1:8765/oauth/teams/callback"
@@ -61,6 +62,38 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/oauth/gitlab/callback":
+            if self.headers.get("Host") != "127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid host"})
+            values = urllib.parse.parse_qs(parsed.query)
+            if len(values.get("state", [])) != 1 or len(values.get("code", [])) != 1:
+                return self.send(400, {"error": "Invalid callback"})
+            try:
+                GITLAB_SESSIONS.complete(self.cookie("team_context_gitlab_session"), values["state"][0], values["code"][0])
+            except ValueError:
+                return self.send(400, {"error": "Invalid or expired authorization"})
+            except (OSError, BotoCoreError, ClientError):
+                return self.send(502, {"error": "Authorization failed"})
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if parsed.path in ("/api/gitlab/status", "/api/gitlab/preview"):
+            if self.headers.get("Host") != "127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid host"})
+            session = self.cookie("team_context_gitlab_session")
+            try:
+                if parsed.path == "/api/gitlab/status":
+                    return self.send(200, {"connected": GITLAB_SESSIONS.connected(session)})
+                project = urllib.parse.parse_qs(parsed.query).get("project", [""])[0]
+                result = GITLAB_SESSIONS.use(session, lambda token: gitlab_preview.merge_requests(token, project))
+                return self.send(200, {"items": result})
+            except ValueError:
+                return self.send(400, {"error": "GitLab preview unavailable"})
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+                return self.send(502, {"error": "Unable to load GitLab data"})
         if parsed.path == "/oauth/teams/callback":
             if self.headers.get("Host") != "127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid host"})
@@ -155,6 +188,33 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, {"error": "Not found"})
 
     def do_POST(self):
+        if self.path in ("/api/gitlab/start", "/api/gitlab/disconnect"):
+            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid origin"})
+            session = self.cookie("team_context_gitlab_session")
+            try:
+                if self.path == "/api/gitlab/disconnect":
+                    GITLAB_SESSIONS.disconnect(session)
+                    return self.send(200, {"connected": False})
+                if GITLAB_SESSIONS.connected(session):
+                    return self.send(409, {"error": "Disconnect the existing connection first."})
+                client_id = os.environ.get("GITLAB_CLIENT_ID")
+                if not client_id:
+                    return self.send(503, {"error": "Set GITLAB_CLIENT_ID to your GitLab OAuth app ID."})
+                session, url = GITLAB_SESSIONS.start(client_id, gitlab.CALLBACK)
+            except ValueError:
+                return self.send(404, {"error": "No connection"})
+            except (OSError, BotoCoreError, ClientError):
+                return self.send(502, {"error": "Unable to manage GitLab connection"})
+            body = json.dumps({"url": url}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Set-Cookie", "team_context_gitlab_session=" + session + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path in ("/api/teams/start", "/api/teams/disconnect"):
             if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid origin"})

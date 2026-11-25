@@ -6,11 +6,11 @@ from storage import clients
 
 
 def _key(session, namespace=None):
-    if namespace not in (None, 'teams'):
+    if namespace not in (None, 'teams', 'gitlab'):
         raise ValueError('Invalid namespace')
     if not isinstance(session, str) or not re.fullmatch(r'[A-Za-z0-9_-]{43}', session):
         return None
-    prefix = 'session:' if namespace is None else 'session:teams:'
+    prefix = 'session:' if namespace is None else 'session:' + namespace + ':'
     return prefix + hashlib.sha256(session.encode()).hexdigest()
 
 

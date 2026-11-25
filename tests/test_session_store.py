@@ -72,3 +72,9 @@ def test_namespaced_sessions_cannot_alias_linear_sessions():
     assert db.delete_item.call_args.kwargs['Key']['connection_id']['S'] == 'session:teams:' + digest
     assert session_store._key(SESSION) == 'session:' + digest
     with pytest.raises(ValueError, match='Invalid namespace'): session_store.get(SESSION, namespace='other')
+
+
+def test_gitlab_namespace_is_distinct():
+    digest = hashlib.sha256(SESSION.encode()).hexdigest()
+    assert session_store._key(SESSION, 'gitlab') == 'session:gitlab:' + digest
+    assert session_store._key(SESSION, 'teams') == 'session:teams:' + digest
