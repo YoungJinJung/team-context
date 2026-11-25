@@ -1,0 +1,17 @@
+[project]
+name = "team-context"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["boto3>=1.35,<2"]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "mutmut>=3.8,<4"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+
+[tool.mutmut]
+also_copy = ["index.html"]
+source_paths = ["app.py", "storage.py", "init_local.py", "connectors/github.py"]
+pytest_add_cli_args_test_selection = ["tests"]

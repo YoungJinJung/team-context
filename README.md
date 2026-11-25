@@ -4,31 +4,41 @@
 
 ## 현재 상태
 
-초기 프로토타입입니다. GitHub **공개 저장소의 최근 PR 최대 30개**를 실제로 가져와 화면에 표시합니다. 인증이나 데이터 저장은 아직 지원하지 않습니다. 로컬 개발용이며 인터넷에 공개해 운영하지 마세요.
+로컬 개발용 프로토타입입니다. GitHub 공개 저장소의 최근 PR 최대 30개를 조회해 LocalStack S3에 저장하고 DynamoDB에 수집 건수를 기록합니다. 비공개 저장소, 인증, 삭제 동기화 및 검색은 아직 제공하지 않습니다. 실제 AWS 리소스를 만들지 않으며 인터넷에 공개해 운영하지 마세요.
 
-## 실행
+## 로컬 실행
 
-Python 3.11 이상이 필요합니다. 추가 패키지는 필요하지 않습니다.
+Docker, Python 3.11 이상, [uv](https://docs.astral.sh/uv/)가 필요합니다.
 
 ```sh
-python3 app.py
+uv sync --no-install-project
+docker compose up -d --wait
+uv run --no-sync python init_local.py
+uv run --no-sync python app.py
 ```
 
-브라우저에서 http://127.0.0.1:8765 를 열고 `owner/repository`를 입력하세요. GitHub API의 인증 없는 요청 제한이 적용됩니다.
+http://127.0.0.1:8765 에서 `owner/repository`를 입력합니다. GitHub API의 인증 없는 요청 제한이 적용됩니다. 에뮬레이터 포트는 `127.0.0.1:4568`이며 별도 AWS 계정은 필요하지 않습니다. LocalStack은 S3·DynamoDB만 사용합니다. 종료할 때 `docker compose down`을 실행합니다. 데이터는 Docker 볼륨에 남습니다. `down -v`는 해당 데이터를 삭제합니다.
+
+## 테스트
+
+```sh
+uv run --no-sync pytest -q
+TEAM_CONTEXT_INTEGRATION=1 uv run --no-sync pytest -q tests/test_localstack.py
+uv run --no-sync mutmut run --max-children 4
+uv run --no-sync mutmut results
+```
+
+통합 테스트는 실행 중인 로컬 에뮬레이터가 필요하며 테스트 데이터를 생성하고 삭제합니다. 뮤테이션 테스트를 새로 측정하려면 이전 `mutants/` 결과를 먼저 삭제해야 합니다. 뮤테이션 테스트는 서버, 저장소, 초기화와 GitHub 커넥터 Python 코드에 적용합니다. UI와 외부 AWS/서비스 구현은 대상이 아닙니다. 최근 측정에서는 변이 400개 중 368개를 탐지했습니다(92.0%). 28개는 생존했고 4개는 비정상 종료 또는 의심 사례로 탐지에 포함하지 않았습니다. 이 수치는 모든 가능한 동작이 검증되었다는 뜻은 아닙니다.
 
 ## 커넥터 만들기
 
-`connectors/`에 Python 모듈을 추가하면 실행기가 자동으로 찾습니다. 모듈은 `MANIFEST`와 `collect(config)`를 제공합니다. `MANIFEST`의 `fields`는 연결 화면의 입력 항목으로 표시됩니다. `collect`는 `id`, `type`, `title`, `url`, `updated_at`, `body`를 가진 레코드 목록을 반환합니다. 예제는 [GitHub 커넥터](connectors/github.py)를 확인하세요. 서버 재시작 후 새 커넥터가 표시됩니다. 신뢰할 수 있는 커넥터 코드만 설치하세요.
-
-```sh
-python3 -m unittest discover -s tests -v
-```
+`connectors/`에 Python 모듈을 추가하면 실행기가 자동으로 찾습니다. 모듈은 `MANIFEST`와 `collect(config)`를 제공합니다. `MANIFEST`의 `fields`는 연결 화면의 입력 항목으로 표시됩니다. `collect`는 `id`, `type`, `title`, `url`, `updated_at`, `body`를 가진 레코드 목록을 반환합니다. 예제는 [GitHub 커넥터](connectors/github.py)를 확인하세요. 서버 재시작 후 새 커넥터가 표시됩니다. 현재 저장소는 GitHub `repository` 설정을 가정하므로 다른 종류의 커넥터를 추가하려면 저장 계약을 확장해야 합니다. 신뢰할 수 있는 커넥터 코드만 설치하세요.
 
 ## 다음 단계
 
 - GitHub App 인증과 비공개 저장소 접근, 페이지 처리 및 변경분 동기화
-- Jira, GitLab, Linear, Confluence, Teams 커넥터
+- Jira, GitLab, Linear, Confluence, Teams 커넥터와 서비스 독립적인 저장 계약
 - 원본 권한·삭제 동기화, 안전한 인증 정보 저장
-- 로컬 저장과 검색, AWS 배포 및 COA 연동
+- 검색, AWS 배포 및 COA 연동
 
 커넥터 계약과 기능은 초기 단계로 변경될 수 있습니다.

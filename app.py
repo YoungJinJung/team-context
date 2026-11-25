@@ -6,6 +6,8 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import connectors
+from storage import persist
+from botocore.exceptions import BotoCoreError, ClientError
 
 ROOT = Path(__file__).parent
 
@@ -52,11 +54,13 @@ class Handler(BaseHTTPRequestHandler):
             module = discover().get(payload.get("connector"))
             if module is None or not isinstance(payload.get("config"), dict):
                 raise ValueError("Invalid connector or configuration")
-            self.send(200, {"records": module.collect(payload["config"])})
+            records = module.collect(payload["config"])
+            persist(payload["connector"], payload["config"], records)
+            self.send(200, {"records": records})
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self.send(400, {"error": str(exc)})
-        except (urllib.error.URLError, TimeoutError, OSError):
-            self.send(502, {"error": "Unable to fetch GitHub data. Check the repository and rate limits."})
+        except (urllib.error.URLError, TimeoutError, OSError, BotoCoreError, ClientError):
+            self.send(502, {"error": "Unable to fetch or store data. Check GitHub and the local AWS emulator."})
 
 
 if __name__ == "__main__":
