@@ -25,10 +25,12 @@ http://127.0.0.1:8765 에서 `owner/repository`를 입력합니다. 서비스 AP
 uv run --no-sync pytest -q
 TEAM_CONTEXT_INTEGRATION=1 uv run --no-sync pytest -q tests/test_localstack.py
 uv run --no-sync mutmut run --max-children 4
+uv run --no-sync mutmut export-cicd-stats
+uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
 uv run --no-sync mutmut results
 ```
 
-통합 테스트는 실행 중인 로컬 에뮬레이터가 필요하며 테스트 데이터를 생성하고 삭제합니다. 뮤테이션 테스트를 새로 측정하려면 이전 `mutants/` 결과를 먼저 삭제해야 합니다. 뮤테이션 테스트는 서버, 저장소, 초기화와 GitHub 커넥터 Python 코드에 적용합니다. UI와 외부 AWS/서비스 구현은 대상이 아닙니다. 최근 측정에서는 변이 487개 중 447개를 탐지했습니다(91.8%). 38개는 생존했고 2개는 비정상 종료 또는 의심 사례로 탐지에 포함하지 않았습니다. 이 수치는 모든 가능한 동작이 검증되었다는 뜻은 아닙니다.
+통합 테스트는 실행 중인 로컬 에뮬레이터가 필요하며 테스트 데이터를 생성하고 삭제합니다. 뮤테이션 테스트를 새로 측정하려면 이전 `mutants/` 결과를 먼저 삭제해야 합니다. 뮤테이션 테스트는 서버, 저장소, 초기화와 GitHub 커넥터 Python 코드에 적용합니다. UI와 외부 AWS/서비스 구현은 대상이 아닙니다. CI는 탐지한 변이 수를 전체 변이 수로 나눈 점수가 90% 이상인지 검사합니다. 도구 오류와 의심 사례는 탐지로 계산하지 않습니다. 이 수치는 모든 가능한 동작이 검증되었다는 뜻은 아닙니다.
 
 ## 커넥터 만들기
 
