@@ -52,4 +52,7 @@ def test_browser_session_with_real_local_secrets_manager():
         assert sessions.connected(cookie)
         with pytest.raises(ValueError): sessions.complete(cookie, state, 'one-time-code')
     finally:
-        vault.delete(secret_id)
+        sessions.disconnect(cookie)
+    assert not sessions.connected(cookie)
+    from botocore.exceptions import ClientError
+    with pytest.raises(ClientError): vault.read(secret_id)

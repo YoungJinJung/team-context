@@ -82,9 +82,21 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, {"error": "Not found"})
 
     def do_POST(self):
+        if self.path == "/api/linear/disconnect":
+            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid origin"})
+            try:
+                SESSIONS.disconnect(self.cookie())
+            except ValueError:
+                return self.send(404, {"error": "No connection"})
+            except (OSError, BotoCoreError, ClientError):
+                return self.send(502, {"error": "Disconnect failed"})
+            return self.send(200, {"connected": False})
         if self.path == "/api/linear/start":
             if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid origin"})
+            if SESSIONS.connected(self.cookie()):
+                return self.send(409, {"error": "Disconnect the existing connection first."})
             client_id = os.environ.get("LINEAR_CLIENT_ID")
             if not client_id:
                 return self.send(503, {"error": "Set LINEAR_CLIENT_ID to your Linear OAuth app client ID."})

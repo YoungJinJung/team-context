@@ -36,3 +36,11 @@ class Sessions:
     def connected(self, session):
         with self._lock:
             return session in self._completed
+
+    def disconnect(self, session):
+        with self._lock:
+            secret_id = self._completed.get(session)
+            if secret_id is None:
+                raise ValueError('No connection')
+            vault.delete(secret_id)
+            del self._completed[session]
