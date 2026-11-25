@@ -4,7 +4,7 @@ services:
     ports:
       - "127.0.0.1:4568:4566"
     environment:
-      SERVICES: s3,dynamodb
+      SERVICES: s3,dynamodb,secretsmanager
       AWS_DEFAULT_REGION: us-east-1
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://localhost:4566/_localstack/health"]
