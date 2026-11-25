@@ -6,10 +6,16 @@ import urllib.request
 MANIFEST = {"id": "github", "name": "GitHub", "category": "source_code", "fields": [{"name": "repository", "label": "Repository (owner/name)", "required": True}]}
 
 
-def collect(config):
+def connection_id(config):
     repository = config.get("repository", "")
     if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or ".." in repository:
         raise ValueError("Repository must be in owner/name format")
+    return "github:" + repository.lower()
+
+
+def collect(config):
+    connection_id(config)
+    repository = config["repository"]
     url = f"https://api.github.com/repos/{repository}/pulls?state=all&per_page=30"
     request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "team-context-mvp"})
     with urllib.request.urlopen(request, timeout=15) as response:
