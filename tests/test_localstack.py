@@ -138,3 +138,26 @@ def test_search_revalidates_local_record_before_return():
         key = hashlib.sha256(record['id'].encode()).hexdigest() + '.json'
         s3.delete_object(Bucket='team-context-records', Key=key)
         db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': 'github:local/example'}})
+
+
+def test_remove_only_selected_public_source():
+    import storage
+    initialize()
+    ids = ['github:local/remove-this:pr:888888', 'github:local/keep-this:pr:888888']
+    records = [{'id': identifier, 'title': 'test'} for identifier in ids]
+    persist('github:local/remove-this', records[:1])
+    persist('github:local/keep-this', records[1:])
+    s3, db = clients()
+    try:
+        assert storage.remove_public_source('github:local/remove-this') == 1
+        from botocore.exceptions import ClientError
+        with pytest.raises(ClientError) as error:
+            s3.get_object(Bucket='team-context-records', Key=hashlib.sha256(ids[0].encode()).hexdigest() + '.json')
+        assert error.value.response['Error']['Code'] == 'NoSuchKey'
+        assert json.loads(s3.get_object(Bucket='team-context-records', Key=hashlib.sha256(ids[1].encode()).hexdigest() + '.json')['Body'].read()) == records[1]
+        assert 'Item' not in db.get_item(TableName='team-context-sync', Key={'connection_id': {'S': 'github:local/remove-this'}}, ConsistentRead=True)
+    finally:
+        for identifier in ids:
+            s3.delete_object(Bucket='team-context-records', Key=hashlib.sha256(identifier.encode()).hexdigest() + '.json')
+        for connection in ('github:local/remove-this', 'github:local/keep-this'):
+            db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': connection}})
