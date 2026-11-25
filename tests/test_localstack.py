@@ -48,7 +48,7 @@ def test_browser_session_with_real_local_secrets_manager():
     with patch('auth.linear._token', return_value=pair):
         secret_id = sessions.complete(cookie, state, 'one-time-code')
     try:
-        assert vault.read(secret_id) == pair
+        assert vault.read(secret_id) == {**pair, 'client_id': 'public-client'}
         assert sessions.connected(cookie)
         assert Sessions().connected(cookie)
         _, db = clients()
@@ -90,3 +90,25 @@ def test_disconnect_recovers_after_secret_already_deleted():
     vault.delete(secret)
     sessions.disconnect(session)
     assert not sessions.connected(session)
+
+
+def test_local_token_refresh_persists_replacement_pair():
+    from unittest.mock import patch
+    from urllib.error import HTTPError
+    from auth.sessions import Sessions
+    from auth import vault
+    sessions = Sessions()
+    session, _ = sessions.start('public-client', 'http://127.0.0.1:8765/oauth/linear/callback')
+    with patch('auth.linear._token', return_value={'access_token': 'old', 'refresh_token': 'old-refresh'}):
+        from urllib.parse import parse_qs, urlsplit
+        state = parse_qs(urlsplit(sessions._items[session][0].url()).query)['state'][0]
+        secret = sessions.complete(session, state, 'code')
+    def operation(token):
+        if token == 'old': raise HTTPError('https://api.linear.app/graphql', 401, 'expired', {}, None)
+        return token
+    try:
+        with patch('auth.sessions.refresh', return_value={'access_token': 'new', 'refresh_token': 'new-refresh'}):
+            assert sessions.use(session, operation) == 'new'
+        assert vault.read(secret) == {'access_token': 'new', 'refresh_token': 'new-refresh', 'client_id': 'public-client'}
+    finally:
+        sessions.disconnect(session)

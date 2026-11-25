@@ -184,7 +184,7 @@ def test_linear_full_flow_uses_session_and_never_returns_tokens(client):
         response, body = request(client, 'GET', '/oauth/linear/callback?code=abc&state=' + state, headers={'Host': '127.0.0.1:8765', 'Cookie': cookie})
         assert response.status == 303 and body == b''
         assert all(secret not in str(response.getheaders()) for secret in ('private-access', 'private-refresh', 'private-secret-id'))
-        store.assert_called_once_with(tokens)
+        store.assert_called_once_with({**tokens, 'client_id': 'public-id'})
         assert exchange.call_args.args[0]['code'] == 'abc'
         response, body = request(client, 'GET', '/api/linear/status', headers={'Cookie': cookie})
         assert json.loads(body) == {'connected': True}

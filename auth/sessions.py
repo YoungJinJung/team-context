@@ -2,8 +2,9 @@
 import secrets
 import threading
 import time
+import urllib.error
 
-from auth.linear import Authorization
+from auth.linear import Authorization, refresh
 from auth import vault, session_store
 
 
@@ -27,7 +28,7 @@ class Sessions:
         if entry is None or entry[1] <= time.monotonic():
             raise ValueError('Invalid or expired session')
         tokens = entry[0].exchange(state, code)
-        secret_id = vault.create(tokens)
+        secret_id = vault.create({**tokens, "client_id": entry[0].client_id})
         try:
             session_store.put(session, secret_id)
         except Exception:
@@ -53,4 +54,11 @@ class Sessions:
             if secret_id is None:
                 raise ValueError('No connection')
             tokens = vault.read(secret_id)
-            return operation(tokens['access_token'])
+            try:
+                return operation(tokens['access_token'])
+            except urllib.error.HTTPError as error:
+                if error.code != 401 or not tokens.get('client_id') or not tokens.get('refresh_token'):
+                    raise
+            renewed = refresh(tokens['client_id'], tokens['refresh_token'])
+            vault.replace(secret_id, {**renewed, 'client_id': tokens['client_id']})
+            return operation(renewed['access_token'])
