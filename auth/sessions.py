@@ -46,3 +46,11 @@ class Sessions:
                 raise ValueError('No connection')
             vault.delete(secret_id)
             session_store.remove(session)
+
+    def use(self, session, operation):
+        with self._lock:
+            secret_id = session_store.get(session)
+            if secret_id is None:
+                raise ValueError('No connection')
+            tokens = vault.read(secret_id)
+            return operation(tokens['access_token'])
