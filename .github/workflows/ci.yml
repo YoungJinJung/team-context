@@ -1,0 +1,37 @@
+name: Tests
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+      - run: uv python install 3.12
+      - run: uv sync --no-install-project --python 3.12 --locked
+      - name: Unit tests
+        run: uv run --no-sync pytest -q
+      - name: Start local AWS emulator
+        run: docker compose up -d --wait
+      - name: Emulator integration
+        run: TEAM_CONTEXT_INTEGRATION=1 uv run --no-sync pytest -q tests/test_localstack.py
+      - name: Mutation tests
+        run: |
+          uv run --no-sync mutmut run --max-children 2
+          uv run --no-sync mutmut export-cicd-stats
+          uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
+      - name: Publish mutation report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: mutation-report
+          path: mutants/mutmut-cicd-stats.json
+          if-no-files-found: ignore
+      - name: Stop local AWS emulator
+        if: always()
+        run: docker compose down -v
