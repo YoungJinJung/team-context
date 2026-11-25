@@ -3,6 +3,7 @@ import json
 import re
 import urllib.parse
 import urllib.request
+from auth.transport import open_url
 
 MANIFEST = {"id": "gitlab", "name": "GitLab", "category": "source_code", "fields": [{"name": "project", "label": "Project (group/project)", "required": True}]}
 
@@ -18,8 +19,21 @@ def collect(config):
     connection_id(config)
     project = config['project']
     encoded = urllib.parse.quote(project, safe='')
-    url = f'https://gitlab.com/api/v4/projects/{encoded}/merge_requests?scope=all&per_page=30'
-    request = urllib.request.Request(url, headers={'Accept': 'application/json', 'User-Agent': 'team-context-mvp'})
-    with urllib.request.urlopen(request, timeout=15) as response:
-        merges = json.load(response)
-    return [{'id': f"gitlab:{project.lower()}:mr:{item['iid']}", 'visibility': 'public', 'type': 'merge_request', 'title': item['title'], 'url': item['web_url'], 'updated_at': item['updated_at'], 'body': item.get('description') or ''} for item in merges]
+    merges = []
+    seen = set()
+    for page in range(1, 101):
+        url = f'https://gitlab.com/api/v4/projects/{encoded}/merge_requests?scope=all&per_page=100&page={page}'
+        request = urllib.request.Request(url, headers={'Accept': 'application/json', 'User-Agent': 'team-context-mvp'})
+        with open_url(request) as response:
+            batch = json.load(response)
+        if not isinstance(batch, list) or len(batch) > 100:
+            raise ValueError('Invalid GitLab page')
+        for item in batch:
+            number = item['iid']
+            if number in seen:
+                raise ValueError('Repeated GitLab merge request')
+            seen.add(number)
+        merges.extend(batch)
+        if len(batch) < 100:
+            return [{'id': f"gitlab:{project.lower()}:mr:{item['iid']}", 'visibility': 'public', 'type': 'merge_request', 'title': item['title'], 'url': item['web_url'], 'updated_at': item['updated_at'], 'body': item.get('description') or ''} for item in merges]
+    raise ValueError('GitLab collection exceeds 100 pages')
