@@ -47,6 +47,13 @@ GitLab.com 비공개 프로젝트는 공개 OAuth 앱의 PKCE 연결 후 현재 
 GitHub.com 비공개 저장소는 GitHub App을 설치하고 해당 사용자가 앱을 승인한 뒤 PR 최대 30개를 미리 볼 수 있습니다. 앱에 저장소 Pull requests 읽기 권한을 설정하고 콜백 URI `http://127.0.0.1:8765/oauth/github/callback`을 등록하세요. `GITHUB_CLIENT_ID`에는 앱 클라이언트 ID를, `GITHUB_APP_SECRET_ID`에는 로컬 Secrets Manager에 JSON `{"client_secret":"..."}`으로 등록한 앱 비밀의 참조 ID를 설정합니다. 개인 토큰은 입력하지 않습니다. 미리보기는 저장·공유되지 않으며 연결 해제는 로컬 토큰만 삭제합니다. 실제 비밀과 조직 토큰을 LocalStack에 저장하지 마세요. 이 로컬 데모는 GitHub Enterprise를 지원하지 않습니다.
 로컬 모의 테스트에서는 `uv run --no-sync python -c 'from auth.vault import create; print(create({"client_secret":"fake-local-secret"}))'`로 가짜 비밀의 참조 ID를 만들 수 있습니다. 이 예제 값으로 실제 GitHub 인증을 할 수는 없습니다.
 
+권한을 잃은 뒤에도 로컬 운영자는 에뮬레이터의 GitLab 프로젝트 ID를 나열하고 특정 스냅샷을 지울 수 있습니다. 수집 중인 서버를 먼저 종료하세요. 다시 수집하면 스냅샷이 생성됩니다. 이 명령은 로컬 에뮬레이터에 접근할 수 있는 운영자용이며 운영 환경의 다중 사용자 삭제 권한을 제공하지 않습니다.
+
+```sh
+uv run --no-sync python -m scripts.private_snapshots list
+uv run --no-sync python -m scripts.private_snapshots remove 123 --confirm
+```
+
 ## 다음 단계
 
 - GitHub App 인증과 비공개 저장소 접근, 변경분 동기화

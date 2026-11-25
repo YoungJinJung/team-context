@@ -360,3 +360,29 @@ def test_failed_private_collection_preserves_previous_snapshot():
         assert s3.get_object(Bucket='team-context-records',Key=key)['Body'].read() == before
     finally:
         s3.delete_object(Bucket='team-context-records',Key=key)
+
+
+def test_local_operator_removes_only_selected_private_snapshot():
+    import uuid
+    from scripts import private_snapshots
+    initialize()
+    first=uuid.uuid4().int % 1000000000000000000 + 1
+    second=first + 1
+    identifier='github:local-' + uuid.uuid4().hex + '/fixture:pr:1'
+    public_key=hashlib.sha256(identifier.encode()).hexdigest()+'.json'
+    first_key=f'private/gitlab/{first}.json'
+    second_key=f'private/gitlab/{second}.json'
+    s3,_=clients()
+    s3.put_object(Bucket='team-context-records',Key=first_key,Body=b'{"visibility":"private"}')
+    s3.put_object(Bucket='team-context-records',Key=second_key,Body=b'{"visibility":"private"}')
+    s3.put_object(Bucket='team-context-records',Key=public_key,Body=b'{"visibility":"public"}')
+    try:
+        assert first in private_snapshots.list_ids() and second in private_snapshots.list_ids()
+        private_snapshots.remove(first)
+        from botocore.exceptions import ClientError
+        with pytest.raises(ClientError): s3.get_object(Bucket='team-context-records',Key=first_key)
+        assert s3.get_object(Bucket='team-context-records',Key=second_key)['Body'].read() == b'{"visibility":"private"}'
+        assert s3.get_object(Bucket='team-context-records',Key=public_key)['Body'].read() == b'{"visibility":"public"}'
+        private_snapshots.remove(first)
+    finally:
+        for key in (first_key,second_key,public_key): s3.delete_object(Bucket='team-context-records',Key=key)
