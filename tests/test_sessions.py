@@ -67,3 +67,28 @@ def test_expired_attempts_are_purged_when_starting():
         current, _ = sessions.start('client', 'http://127.0.0.1/callback')
     assert expired not in sessions._items
     assert current in sessions._items
+
+
+def test_disconnect_deletes_secret_only_for_session():
+    sessions = Sessions()
+    one, _ = sessions.start('client', 'http://127.0.0.1/callback')
+    two, _ = sessions.start('client', 'http://127.0.0.1/callback')
+    with patch('auth.sessions.Authorization.exchange', return_value={}), patch('auth.sessions.vault.create', side_effect=['one-secret', 'two-secret']), patch('auth.sessions.vault.delete') as delete:
+        sessions.complete(one, 'state', 'code')
+        sessions.complete(two, 'state', 'code')
+        sessions.disconnect(one)
+        delete.assert_called_once_with('one-secret')
+        assert not sessions.connected(one) and sessions.connected(two)
+        with pytest.raises(ValueError): sessions.disconnect(one)
+
+
+def test_disconnect_failure_can_be_retried():
+    sessions = Sessions()
+    session, _ = sessions.start('client', 'http://127.0.0.1/callback')
+    with patch('auth.sessions.Authorization.exchange', return_value={}), patch('auth.sessions.vault.create', return_value='secret'), patch('auth.sessions.vault.delete', side_effect=[OSError('failed'), None]) as delete:
+        sessions.complete(session, 'state', 'code')
+        with pytest.raises(OSError): sessions.disconnect(session)
+        assert sessions.connected(session)
+        sessions.disconnect(session)
+        assert not sessions.connected(session)
+        assert delete.call_count == 2

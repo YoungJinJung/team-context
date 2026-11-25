@@ -125,7 +125,7 @@ def test_linear_authorization_and_safe_callback_logging(client, capsys):
     sessions = Mock()
     sessions.start.return_value = ('safe-cookie', 'https://linear.app/oauth/authorize?state=state')
     sessions.complete.return_value = 'secret-id'
-    sessions.connected.return_value = True
+    sessions.connected.side_effect = [False, True]
     headers = {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'}
     with patch('app.SESSIONS', sessions), patch.dict('os.environ', {'LINEAR_CLIENT_ID': 'public-id'}):
         response, data = request(client, 'POST', '/api/linear/start', '', headers)
@@ -208,3 +208,24 @@ def test_callback_rejects_multiple_or_missing_parameters(client):
     for query in ('?code=a&code=b&state=s', '?code=&state=s', '?code=c&state=', '?code=c&state=s&state=t'):
         response, data = request(client, 'GET', '/oauth/linear/callback' + query, headers={'Host': '127.0.0.1:8765'})
         assert response.status == 400 and json.loads(data) == {'error': 'Invalid callback'}
+
+
+def test_linear_disconnect_endpoint(client):
+    headers = {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765', 'Cookie': 'team_context_session=safe-cookie'}
+    with patch('app.SESSIONS.disconnect') as disconnect:
+        response, data = request(client, 'POST', '/api/linear/disconnect', '', headers)
+        assert response.status == 200 and json.loads(data) == {'connected': False}
+        disconnect.assert_called_once_with('safe-cookie')
+    for failure, status, message in [(ValueError('private'), 404, 'No connection'), (OSError('private'), 502, 'Disconnect failed')]:
+        with patch('app.SESSIONS.disconnect', side_effect=failure):
+            response, data = request(client, 'POST', '/api/linear/disconnect', '', headers)
+        assert response.status == status and json.loads(data) == {'error': message}
+    response, data = request(client, 'POST', '/api/linear/disconnect', '', {'Host': '127.0.0.1:8765', 'Origin': 'https://evil.example'})
+    assert response.status == 403 and json.loads(data) == {'error': 'Invalid origin'}
+
+
+def test_linear_cannot_replace_existing_connection(client):
+    with patch('app.SESSIONS.connected', return_value=True), patch('app.SESSIONS.start') as start:
+        response, data = request(client, 'POST', '/api/linear/start', '', {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'})
+    assert response.status == 409 and json.loads(data) == {'error': 'Disconnect the existing connection first.'}
+    start.assert_not_called()
