@@ -21,3 +21,16 @@ def test_s3_and_dynamodb_roundtrip():
     assert item['count']['N'] == '1'
     s3.delete_object(Bucket='team-context-records', Key=key)
     db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': 'github:example/test'}})
+
+
+def test_secrets_roundtrip():
+    from auth import vault
+    tokens = {'access_token': 'test-access', 'refresh_token': 'test-refresh'}
+    secret = vault.create(tokens)
+    try:
+        assert vault.read(secret) == tokens
+        replacement = {'access_token': 'new-access', 'refresh_token': 'new-refresh'}
+        vault.replace(secret, replacement)
+        assert vault.read(secret) == replacement
+    finally:
+        vault.delete(secret)

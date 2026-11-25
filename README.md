@@ -17,7 +17,7 @@ uv run --no-sync python init_local.py
 uv run --no-sync python app.py
 ```
 
-http://127.0.0.1:8765 에서 `owner/repository`를 입력합니다. 서비스 API의 인증 없는 요청 제한이 적용됩니다. GitLab은 중첩 그룹을 포함해 `group/project` 형식으로 입력합니다. 에뮬레이터 포트는 `127.0.0.1:4568`이며 별도 AWS 계정은 필요하지 않습니다. LocalStack은 S3·DynamoDB만 사용합니다. 종료할 때 `docker compose down`을 실행합니다. 데이터는 Docker 볼륨에 남습니다. `down -v`는 해당 데이터를 삭제합니다.
+http://127.0.0.1:8765 에서 `owner/repository`를 입력합니다. 서비스 API의 인증 없는 요청 제한이 적용됩니다. GitLab은 중첩 그룹을 포함해 `group/project` 형식으로 입력합니다. 에뮬레이터 포트는 `127.0.0.1:4568`이며 별도 AWS 계정은 필요하지 않습니다. LocalStack은 S3·DynamoDB·Secrets Manager를 사용합니다. LocalStack 데이터는 개발용이며 실제 비밀을 안전하게 보관하는 저장소로 취급하지 마세요. 종료할 때 `docker compose down`을 실행합니다. 데이터는 Docker 볼륨에 남습니다. `down -v`는 해당 데이터를 삭제합니다.
 
 ## 테스트
 
@@ -38,7 +38,7 @@ uv run --no-sync mutmut results
 
 ## 인증 개발 현황
 
-Linear OAuth 2.0 PKCE 클라이언트 기초가 포함되어 있습니다. 아직 웹 연결 화면이나 토큰 저장에 연결되지 않았으며 실제 Linear 연결은 지원하지 않습니다. 콜백을 추가할 때 상태를 사용자 세션에 연결하고, 토큰 회전·보관을 구현해야 합니다. 사용자 개인 API 키를 받는 방식은 기본 인증으로 사용하지 않습니다.
+Linear OAuth 2.0 PKCE 클라이언트 기초가 포함되어 있습니다. 아직 웹 연결 화면이나 토큰 저장에 연결되지 않았으며 실제 Linear 연결은 지원하지 않습니다. 콜백을 추가할 때 상태를 사용자 세션에 연결하고, 사용자 세션 연결과 동시 갱신 제어를 구현해야 합니다. 개발용 Secrets Manager 저장 계층은 별도로 제공하지만 아직 인증 흐름에 연결되지 않았습니다. 사용자 개인 API 키를 받는 방식은 기본 인증으로 사용하지 않습니다.
 
 ## 다음 단계
 
