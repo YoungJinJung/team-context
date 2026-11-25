@@ -3,7 +3,7 @@ import hashlib
 import json
 import re
 import boto3
-from source_verification import current
+from source_verification import current, status
 
 
 def clients():
@@ -58,3 +58,22 @@ def remove_public_source(connection):
         s3.delete_object(Bucket='team-context-records', Key=key)
     db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': connection}})
     return len(keys)
+
+
+def cleanup_unavailable():
+    s3, _ = clients()
+    candidates = []
+    for page in s3.get_paginator('list_objects_v2').paginate(Bucket='team-context-records'):
+        for item in page.get('Contents', []):
+            key = item['Key']
+            record = json.loads(s3.get_object(Bucket='team-context-records', Key=key)['Body'].read())
+            record_id = record.get('id')
+            if record.get('visibility') != 'public' or not isinstance(record_id, str):
+                continue
+            if key != hashlib.sha256(record_id.encode()).hexdigest() + '.json':
+                continue
+            if status(record) == 'unavailable':
+                candidates.append(key)
+    for key in candidates:
+        s3.delete_object(Bucket='team-context-records', Key=key)
+    return len(candidates)

@@ -59,3 +59,12 @@ def test_number_must_match():
 def test_extra_metadata_is_not_exposed():
     with patch('source_verification.open_url', return_value=Response(json.dumps(GITHUB_ITEM).encode())):
         assert current({**GITHUB, 'unexpected': 'private'}) is False
+
+
+def test_status_distinguishes_unavailable_changed_and_invalid():
+    from source_verification import status
+    with patch('source_verification.open_url', side_effect=HTTPError('https://api.github.com', 404, 'missing', {}, None)):
+        assert status(GITHUB) == 'unavailable'
+    with patch('source_verification.open_url', return_value=Response(json.dumps({**GITHUB_ITEM, 'title': 'new'}).encode())):
+        assert status(GITHUB) == 'changed'
+    assert status({'id': 'untrusted'}) == 'invalid'

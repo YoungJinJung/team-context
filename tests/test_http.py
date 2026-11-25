@@ -325,3 +325,19 @@ def test_collection_and_removal_do_not_race(client):
             assert other.result()[0].status == 200
             assert removal_started.is_set()
     second.close()
+
+
+def test_cleanup_requires_local_origin_and_reports_failures(client):
+    headers = {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'}
+    with patch('app.cleanup_unavailable', return_value=2) as cleanup:
+        response, data = request(client, 'POST', '/api/cleanup-unavailable', '', headers)
+    assert response.status == 200 and json.loads(data) == {'removed': 2}
+    cleanup.assert_called_once_with()
+    for bad in ({'Host': 'evil.example', 'Origin': 'http://127.0.0.1:8765'}, {'Host': '127.0.0.1:8765', 'Origin': 'https://evil.example'}, {'Host': '127.0.0.1:8765'}):
+        response, data = request(client, 'POST', '/api/cleanup-unavailable', '', bad)
+        assert response.status == 403 and json.loads(data) == {'error': 'Invalid origin'}
+    for error in (OSError('secret'), ValueError('secret'), KeyError('secret'), TypeError('secret')):
+        with patch('app.cleanup_unavailable', side_effect=error):
+            response, data = request(client, 'POST', '/api/cleanup-unavailable', '', headers)
+        assert response.status == 502 and json.loads(data) == {'error': 'Unable to verify or clean local records'}
+        assert b'secret' not in data

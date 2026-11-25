@@ -7,15 +7,15 @@ import urllib.request
 from auth.transport import open_url
 
 
-def current(record):
+def status(record):
     source_id = record.get('id')
     if not isinstance(source_id, str):
-        return False
+        return 'invalid'
     github = re.fullmatch(r'github:([a-z0-9_.-]+/[a-z0-9_.-]+):pr:([1-9][0-9]*)', source_id)
     gitlab = re.fullmatch(r'gitlab:([a-z0-9_.-]+(?:/[a-z0-9_.-]+)+):mr:([1-9][0-9]*)', source_id)
     match = github or gitlab
     if not match or '..' in match.group(1):
-        return False
+        return 'invalid'
     project, number = match.groups()
     if github:
         url = f'https://api.github.com/repos/{project}/pulls/{number}'
@@ -27,7 +27,7 @@ def current(record):
             item = json.load(response)
     except urllib.error.HTTPError as error:
         if error.code in (404, 410):
-            return False
+            return 'unavailable'
         raise
     expected = {
         'id': source_id,
@@ -39,4 +39,10 @@ def current(record):
         'body': (item.get('body') if github else item.get('description')) or '',
     }
     item_number = item['number'] if github else item['iid']
-    return str(item_number) == number and record == expected
+    if str(item_number) == number and record == expected:
+        return 'current'
+    return 'changed'
+
+
+def current(record):
+    return status(record) == 'current'

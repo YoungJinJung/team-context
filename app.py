@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import connectors
-from storage import persist, search, remove_public_source
+from storage import persist, search, remove_public_source, cleanup_unavailable
 from auth.sessions import Sessions
 from auth import linear_preview
 from botocore.exceptions import BotoCoreError, ClientError
@@ -111,6 +111,15 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, {"error": "Not found"})
 
     def do_POST(self):
+        if self.path == "/api/cleanup-unavailable":
+            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid origin"})
+            try:
+                with STORAGE_LOCK:
+                    count = cleanup_unavailable()
+                return self.send(200, {"removed": count})
+            except (OSError, BotoCoreError, ClientError, ValueError, KeyError, TypeError):
+                return self.send(502, {"error": "Unable to verify or clean local records"})
         if self.path == "/api/linear/disconnect":
             if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid origin"})
