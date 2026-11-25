@@ -13,5 +13,5 @@ pythonpath = ["."]
 
 [tool.mutmut]
 also_copy = ["index.html"]
-source_paths = ["app.py", "storage.py", "init_local.py", "connectors/github.py", "connectors/gitlab.py", "scripts/check_mutation.py", "auth/linear.py", "auth/vault.py"]
+source_paths = ["app.py", "storage.py", "init_local.py", "connectors/github.py", "connectors/gitlab.py", "scripts/check_mutation.py", "auth/linear.py", "auth/vault.py", "auth/sessions.py"]
 pytest_add_cli_args_test_selection = ["tests"]
