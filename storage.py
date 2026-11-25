@@ -77,3 +77,31 @@ def cleanup_unavailable():
     for key in candidates:
         s3.delete_object(Bucket='team-context-records', Key=key)
     return len(candidates)
+
+
+def list_public_sources():
+    _, db = clients()
+    results = []
+    pages = db.get_paginator('scan').paginate(
+        TableName='team-context-sync',
+        ProjectionExpression='#connection, #count',
+        ExpressionAttributeNames={'#connection': 'connection_id', '#count': 'count'},
+    )
+    for page in pages:
+        for item in page.get('Items', []):
+            connection = item.get('connection_id', {}).get('S', '')
+            if not isinstance(connection, str):
+                continue
+            github = re.fullmatch(r'github:([a-z0-9_.-]+/[a-z0-9_.-]+)', connection)
+            gitlab = re.fullmatch(r'gitlab:([a-z0-9_.-]+(?:/[a-z0-9_.-]+)+)', connection)
+            match = github or gitlab
+            if not match or '..' in match.group(1):
+                continue
+            try:
+                count = int(item['count']['N'])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if count < 0:
+                continue
+            results.append({'connector': 'github' if github else 'gitlab', 'source': match.group(1), 'count': count})
+    return sorted(results, key=lambda item: (item['connector'], item['source']))

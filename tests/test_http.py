@@ -341,3 +341,16 @@ def test_cleanup_requires_local_origin_and_reports_failures(client):
             response, data = request(client, 'POST', '/api/cleanup-unavailable', '', headers)
         assert response.status == 502 and json.loads(data) == {'error': 'Unable to verify or clean local records'}
         assert b'secret' not in data
+
+
+def test_source_list_local_host_and_failure(client):
+    sources = [{'connector': 'github', 'source': 'a/b', 'count': 2}]
+    with patch('app.list_public_sources', return_value=sources):
+        response, data = request(client, 'GET', '/api/sources', headers={'Host': '127.0.0.1:8765'})
+    assert response.status == 200 and json.loads(data) == {'sources': sources}
+    assert response.getheader('Cache-Control') == 'no-store'
+    response, data = request(client, 'GET', '/api/sources', headers={'Host': 'evil.example'})
+    assert response.status == 403 and json.loads(data) == {'error': 'Invalid host'}
+    with patch('app.list_public_sources', side_effect=OSError('secret')):
+        response, data = request(client, 'GET', '/api/sources', headers={'Host': '127.0.0.1:8765'})
+    assert response.status == 502 and json.loads(data) == {'error': 'Unable to list local sources'} and b'secret' not in data

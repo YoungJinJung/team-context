@@ -184,3 +184,21 @@ def test_cleanup_unavailable_only_removes_matching_local_record():
             s3.delete_object(Bucket='team-context-records', Key=hashlib.sha256(record['id'].encode()).hexdigest() + '.json')
         for connection in ('github:local/cleanup', 'github:local/keep'):
             db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': connection}})
+
+
+def test_list_public_sources_does_not_expose_session_metadata():
+    import storage
+    from auth import session_store
+    initialize()
+    session = 'b' * 43
+    session_store.put(session, 'private-reference')
+    persist('github:local/list-source', [{'id': 'github:local/list-source:pr:9999'}])
+    try:
+        sources = storage.list_public_sources()
+        assert {'connector': 'github', 'source': 'local/list-source', 'count': 1} in sources
+        assert session not in str(sources) and 'private-reference' not in str(sources)
+    finally:
+        session_store.remove(session)
+        s3, db = clients()
+        s3.delete_object(Bucket='team-context-records', Key=hashlib.sha256(b'github:local/list-source:pr:9999').hexdigest() + '.json')
+        db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': 'github:local/list-source'}})
