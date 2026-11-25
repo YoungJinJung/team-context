@@ -2,6 +2,19 @@
 
 팀의 문서, 코드, 대화, 업무 티켓을 공통 형식으로 연결하기 위한 오픈소스 프로젝트입니다.
 
+- [아키텍처 문서와 AWS 설계 옵션](docs/architecture.md)
+- [커넥터 개발 안내](docs/connectors.md) · [로컬 개발 및 테스트](docs/development.md)
+- [공유용 아키텍처 페이지](https://youngjinjung.github.io/team-context/)
+- [개발 이슈와 남은 작업](https://github.com/YoungJinJung/team-context/issues)
+
+## 아키텍처
+
+아래는 **AWS 배포를 위한 제안**입니다. 현재 저장소는 로컬 프로토타입이며 AWS 배포와 COA 연동은 아직 구현하지 않았습니다.
+
+![저비용 MVP AWS 아키텍처](docs/assets/architecture-mvp.png)
+
+[COA 확장형 다이어그램과 비용 최적화](docs/architecture.md#2-coa-확장형-온톨로지와-그래프-탐색)를 함께 확인하세요.
+
 ## 현재 상태
 
 로컬 개발용 프로토타입입니다. GitHub 공개 저장소 PR 또는 GitLab.com 공개 프로젝트 MR을 수집합니다. 두 서비스 모두 최대 100페이지를 조회합니다. 수집한 결과는 LocalStack S3에 저장하고 DynamoDB에 건수를 기록합니다. 어느 서비스든 100페이지가 모두 가득 차면 누락 가능성 때문에 수집 전체를 실패 처리합니다. 저장된 공개 PR/MR은 제목·본문의 단순 문자열로 검색할 수 있습니다. GitLab.com 비공개 MR은 인증한 사용자가 로컬에서 수집하고 원본 권한 확인 후 검색할 수 있습니다. 다른 비공개 자료 수집과 삭제·권한 변경의 자동 동기화는 제공하지 않습니다. Linear 인증은 로컬 시험용입니다. 실제 AWS 리소스를 만들지 않으며 인터넷에 공개해 운영하지 마세요.
@@ -56,8 +69,8 @@ uv run --no-sync python -m scripts.private_snapshots remove 123 --confirm
 
 ## 다음 단계
 
-- GitHub App 인증과 비공개 저장소 접근, 변경분 동기화
-- Jira, Linear, Confluence, Teams 커넥터와 서비스 독립적인 저장 계약
+- GitHub 비공개 PR 수집·검색, GitHub Enterprise 및 자체 호스팅 GitLab 지원
+- Jira·Confluence 연결, Linear 이슈와 Teams 메시지 수집, 서비스 독립적인 저장 계약
 - 원본 권한·삭제 동기화, 안전한 인증 정보 저장
 - 검색 품질 개선, AWS 배포 및 COA 연동
 
