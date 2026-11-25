@@ -161,3 +161,26 @@ def test_remove_only_selected_public_source():
             s3.delete_object(Bucket='team-context-records', Key=hashlib.sha256(identifier.encode()).hexdigest() + '.json')
         for connection in ('github:local/remove-this', 'github:local/keep-this'):
             db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': connection}})
+
+
+def test_cleanup_unavailable_only_removes_matching_local_record():
+    from unittest.mock import patch
+    import storage
+    initialize()
+    records = [{'id': 'github:local/cleanup:pr:999999', 'visibility': 'public'}, {'id': 'github:local/keep:pr:999999', 'visibility': 'public'}]
+    persist('github:local/cleanup', records[:1])
+    persist('github:local/keep', records[1:])
+    s3, db = clients()
+    def status(record):
+        return 'unavailable' if record['id'] == records[0]['id'] else 'current'
+    try:
+        with patch('storage.status', side_effect=status):
+            assert storage.cleanup_unavailable() == 1
+        from botocore.exceptions import ClientError
+        with pytest.raises(ClientError): s3.get_object(Bucket='team-context-records', Key=hashlib.sha256(records[0]['id'].encode()).hexdigest() + '.json')
+        assert s3.get_object(Bucket='team-context-records', Key=hashlib.sha256(records[1]['id'].encode()).hexdigest() + '.json')
+    finally:
+        for record in records:
+            s3.delete_object(Bucket='team-context-records', Key=hashlib.sha256(record['id'].encode()).hexdigest() + '.json')
+        for connection in ('github:local/cleanup', 'github:local/keep'):
+            db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': connection}})
