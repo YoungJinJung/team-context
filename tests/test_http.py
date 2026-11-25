@@ -118,3 +118,93 @@ def test_another_connector_can_persist_without_repository(client):
         response, data = request(client, 'POST', '/api/collect', body)
     assert response.status == 200 and json.loads(data)['records'] == [{'id': 'example:one'}]
     persist.assert_called_once_with('example:one', [{'id': 'example:one'}])
+
+
+def test_linear_authorization_and_safe_callback_logging(client, capsys):
+    from unittest.mock import Mock
+    sessions = Mock()
+    sessions.start.return_value = ('safe-cookie', 'https://linear.app/oauth/authorize?state=state')
+    sessions.complete.return_value = 'secret-id'
+    sessions.connected.return_value = True
+    headers = {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'}
+    with patch('app.SESSIONS', sessions), patch.dict('os.environ', {'LINEAR_CLIENT_ID': 'public-id'}):
+        response, data = request(client, 'POST', '/api/linear/start', '', headers)
+        assert response.status == 200
+        assert response.getheader('Content-Type') == 'application/json; charset=utf-8'
+        assert response.getheader('Content-Length') == str(len(data))
+        assert json.loads(data) == {'url': 'https://linear.app/oauth/authorize?state=state'}
+        assert response.getheader('Cache-Control') == 'no-store'
+        cookie = response.getheader('Set-Cookie')
+        assert cookie == 'team_context_session=safe-cookie; HttpOnly; SameSite=Lax; Path=/; Max-Age=600'
+        sessions.start.assert_called_once_with('public-id', app.CALLBACK)
+        response, data = request(client, 'GET', '/oauth/linear/callback?code=private-code&state=state', headers={'Host': '127.0.0.1:8765', 'Cookie': cookie})
+        assert response.status == 303 and response.getheader('Location') == '/'
+        assert response.getheader('Content-Length') == '0'
+        assert response.getheader('Cache-Control') == 'no-store'
+        assert data == b'' and 'secret-id' not in str(response.getheaders())
+        sessions.complete.assert_called_once_with('safe-cookie', 'state', 'private-code')
+        response, data = request(client, 'GET', '/api/linear/status', headers={'Cookie': cookie})
+        assert response.status == 200 and json.loads(data) == {'connected': True}
+    logs = capsys.readouterr().err
+    assert 'private-code' not in logs
+    assert 'GET /oauth/linear/callback' in logs and '303' in logs
+
+
+def test_linear_start_and_callback_reject_invalid_requests(client):
+    with patch.dict('os.environ', {}, clear=True):
+        response, _ = request(client, 'POST', '/api/linear/start', '', {'Host': '127.0.0.1:8765', 'Origin': 'http://evil.example'})
+        assert response.status == 403
+        response, data = request(client, 'POST', '/api/linear/start', '', {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'})
+        assert response.status == 503 and json.loads(data) == {'error': 'Set LINEAR_CLIENT_ID to your Linear OAuth app client ID.'}
+    response, data = request(client, 'GET', '/oauth/linear/callback?code=x&state=y', headers={'Host': 'evil.example'})
+    assert response.status == 403 and json.loads(data) == {'error': 'Invalid host'}
+    for query in ('', '?code=x', '?state=y', '?code=x&state=a&state=b'):
+        response, _ = request(client, 'GET', '/oauth/linear/callback' + query, headers={'Host': '127.0.0.1:8765'})
+        assert response.status == 400
+    with patch('app.SESSIONS.complete', side_effect=ValueError('invalid')):
+        response, _ = request(client, 'GET', '/oauth/linear/callback?code=x&state=y', headers={'Host': '127.0.0.1:8765'})
+        assert response.status == 400
+    with patch('app.SESSIONS.complete', side_effect=OSError('failure')):
+        response, _ = request(client, 'GET', '/oauth/linear/callback?code=x&state=y', headers={'Host': '127.0.0.1:8765'})
+        assert response.status == 502
+
+
+def test_linear_full_flow_uses_session_and_never_returns_tokens(client):
+    from auth.sessions import Sessions
+    from urllib.parse import parse_qs, urlsplit
+    sessions = Sessions()
+    headers = {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'}
+    tokens = {'access_token': 'private-access', 'refresh_token': 'private-refresh'}
+    with patch('app.SESSIONS', sessions), patch.dict('os.environ', {'LINEAR_CLIENT_ID': 'public-id'}), patch('auth.linear._token', return_value=tokens) as exchange, patch('auth.sessions.vault.create', return_value='private-secret-id') as store:
+        response, body = request(client, 'POST', '/api/linear/start', '', headers)
+        cookie = response.getheader('Set-Cookie').split(';', 1)[0]
+        state = parse_qs(urlsplit(json.loads(body)['url']).query)['state'][0]
+        response, body = request(client, 'GET', '/api/linear/status', headers={'Cookie': cookie})
+        assert json.loads(body) == {'connected': False}
+        response, body = request(client, 'GET', '/oauth/linear/callback?code=abc&state=' + state, headers={'Host': '127.0.0.1:8765', 'Cookie': cookie})
+        assert response.status == 303 and body == b''
+        assert all(secret not in str(response.getheaders()) for secret in ('private-access', 'private-refresh', 'private-secret-id'))
+        store.assert_called_once_with(tokens)
+        assert exchange.call_args.args[0]['code'] == 'abc'
+        response, body = request(client, 'GET', '/api/linear/status', headers={'Cookie': cookie})
+        assert json.loads(body) == {'connected': True}
+        response, body = request(client, 'GET', '/oauth/linear/callback?code=abc&state=' + state, headers={'Host': '127.0.0.1:8765', 'Cookie': cookie})
+        assert response.status == 400
+
+
+def test_linear_callback_failure_is_safe_and_start_requires_host(client):
+    with patch.dict('os.environ', {'LINEAR_CLIENT_ID': 'public-id'}):
+        for headers in ({'Host': 'evil.example', 'Origin': 'http://127.0.0.1:8765'}, {'Host': '127.0.0.1:8765'}, {'Host': '127.0.0.1:8765', 'Origin': 'http://localhost:8765'}):
+            response, data = request(client, 'POST', '/api/linear/start', '', headers)
+            assert response.status == 403 and json.loads(data) == {'error': 'Invalid origin'}
+    for failure, status, message in [(ValueError('private'), 400, 'Invalid or expired authorization'), (OSError('private'), 502, 'Authorization failed')]:
+        with patch('app.SESSIONS.complete', side_effect=failure):
+            response, data = request(client, 'GET', '/oauth/linear/callback?code=private-code&state=state', headers={'Host': '127.0.0.1:8765'})
+        assert response.status == status and json.loads(data) == {'error': message}
+        assert b'private' not in data
+
+
+def test_callback_rejects_multiple_or_missing_parameters(client):
+    for query in ('?code=a&code=b&state=s', '?code=&state=s', '?code=c&state=', '?code=c&state=s&state=t'):
+        response, data = request(client, 'GET', '/oauth/linear/callback' + query, headers={'Host': '127.0.0.1:8765'})
+        assert response.status == 400 and json.loads(data) == {'error': 'Invalid callback'}

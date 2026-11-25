@@ -34,3 +34,22 @@ def test_secrets_roundtrip():
         assert vault.read(secret) == replacement
     finally:
         vault.delete(secret)
+
+
+def test_browser_session_with_real_local_secrets_manager():
+    from unittest.mock import patch
+    from urllib.parse import parse_qs, urlsplit
+    from auth.sessions import Sessions
+    from auth import vault
+    sessions = Sessions()
+    cookie, url = sessions.start('public-client', 'http://127.0.0.1:8765/oauth/linear/callback')
+    state = parse_qs(urlsplit(url).query)['state'][0]
+    pair = {'access_token': 'local-example-access', 'refresh_token': 'local-example-refresh'}
+    with patch('auth.linear._token', return_value=pair):
+        secret_id = sessions.complete(cookie, state, 'one-time-code')
+    try:
+        assert vault.read(secret_id) == pair
+        assert sessions.connected(cookie)
+        with pytest.raises(ValueError): sessions.complete(cookie, state, 'one-time-code')
+    finally:
+        vault.delete(secret_id)
