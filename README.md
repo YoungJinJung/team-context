@@ -4,7 +4,7 @@
 
 ## 현재 상태
 
-로컬 개발용 프로토타입입니다. GitHub 공개 저장소 PR 또는 GitLab.com 공개 프로젝트 MR을 수집합니다. 두 서비스 모두 최대 100페이지를 조회합니다. 수집한 결과는 LocalStack S3에 저장하고 DynamoDB에 건수를 기록합니다. 어느 서비스든 100페이지가 모두 가득 차면 누락 가능성 때문에 수집 전체를 실패 처리합니다. 저장된 공개 PR/MR은 제목·본문의 단순 문자열로 검색할 수 있습니다. 비공개 자료 수집과 삭제·권한 변경 동기화는 제공하지 않습니다. Linear 인증은 로컬 시험용입니다. 실제 AWS 리소스를 만들지 않으며 인터넷에 공개해 운영하지 마세요.
+로컬 개발용 프로토타입입니다. GitHub 공개 저장소 PR 또는 GitLab.com 공개 프로젝트 MR을 수집합니다. 두 서비스 모두 최대 100페이지를 조회합니다. 수집한 결과는 LocalStack S3에 저장하고 DynamoDB에 건수를 기록합니다. 어느 서비스든 100페이지가 모두 가득 차면 누락 가능성 때문에 수집 전체를 실패 처리합니다. 저장된 공개 PR/MR은 제목·본문의 단순 문자열로 검색할 수 있습니다. GitLab.com 비공개 MR은 인증한 사용자가 로컬에서 수집하고 원본 권한 확인 후 검색할 수 있습니다. 다른 비공개 자료 수집과 삭제·권한 변경의 자동 동기화는 제공하지 않습니다. Linear 인증은 로컬 시험용입니다. 실제 AWS 리소스를 만들지 않으며 인터넷에 공개해 운영하지 마세요.
 
 ## 로컬 실행
 
@@ -42,7 +42,7 @@ Linear OAuth 2.0 PKCE 연결을 로컬에서 시험할 수 있습니다. Linear�
 
 Microsoft Teams는 로컬에서 Entra 공개 클라이언트의 OAuth PKCE로 연결하고 팀 및 채널 목록의 첫 페이지만 브라우저에서 미리 볼 수 있습니다. Microsoft Entra 앱 등록에서 모바일 및 데스크톱 공개 클라이언트를 설정하고, 조직 계정용 위임 권한 `Team.ReadBasic.All`, `Channel.ReadBasic.All`과 `offline_access`에 동의해야 합니다. 리디렉션 URI `http://127.0.0.1:8765/oauth/teams/callback`은 앱 매니페스트에서 등록하고 공개 클라이언트 ID를 `TEAMS_CLIENT_ID`로 설정하세요. 조직 정책에 따라 관리자 동의가 필요할 수 있습니다. 공유 채널의 호스트 팀은 이 목록에 포함되지 않을 수 있습니다. 메시지 수집, 페이지 전체 조회, 원본 권한 동기화는 지원하지 않습니다. Linear와 마찬가지로 실제 조직 토큰은 로컬 에뮬레이터에 저장하지 마세요.
 
-GitLab.com 비공개 프로젝트는 공개 OAuth 앱의 PKCE 연결 후 현재 사용자의 접근 권한으로 MR 최대 30개를 미리 볼 수 있습니다. GitLab OAuth 앱에서 `Confidential` 설정을 끄고 `read_api` 권한과 리디렉션 URI `http://127.0.0.1:8765/oauth/gitlab/callback`을 등록한 뒤 앱 ID를 `GITLAB_CLIENT_ID`로 설정하세요. 미리보기는 저장·공유되지 않습니다. 연결 해제는 로컬 토큰을 삭제하며 GitLab의 앱 승인 철회는 별도로 해야 합니다. 현재 자체 호스팅 GitLab과 비공개 자료의 공유 수집은 지원하지 않습니다. 실제 조직 토큰은 LocalStack에 저장하지 마세요.
+GitLab.com 비공개 프로젝트는 공개 OAuth 앱의 PKCE 연결 후 현재 사용자의 접근 권한으로 MR 최대 30개를 미리 볼 수 있습니다. GitLab OAuth 앱에서 `Confidential` 설정을 끄고 `read_api` 권한과 리디렉션 URI `http://127.0.0.1:8765/oauth/gitlab/callback`을 등록한 뒤 앱 ID를 `GITLAB_CLIENT_ID`로 설정하세요. 미리보기는 저장·공유되지 않습니다. 연결 해제는 로컬 토큰을 삭제하며 GitLab의 앱 승인 철회는 별도로 해야 합니다. 로컬 개발에서 비공개 MR을 프로젝트별 단일 스냅샷으로 수집하고, 검색 시 요청자의 토큰으로 프로젝트 및 원본 MR을 다시 확인할 수 있습니다. 100개씩 최대 10페이지와 마지막 빈 확인 페이지를 조회하며, 11번째 페이지에 자료가 있거나 스냅샷이 2 MiB를 넘으면 저장하지 않습니다. 원본 접근이 거부되거나 MR이 삭제·변경된 경우 해당 검색 결과를 반환하지 않습니다. 검색 시 원본 API 요청이 발생하고, 확인 이후의 권한 변경까지 즉시 보장하지는 못합니다. 페이지를 수집하는 동안 원본이 바뀌면 일부 자료가 누락될 수 있으므로 다시 수집해야 합니다. 여러 프로세스의 동시 수집은 마지막 쓰기가 이기며, 만료된 스냅샷 자동 삭제와 운영용 사용자 격리는 아직 없습니다. 현재 자체 호스팅 GitLab, GitHub 비공개 자료의 저장과 운영용 공유 수집은 지원하지 않습니다. 실제 조직 토큰은 LocalStack에 저장하지 마세요.
 
 GitHub.com 비공개 저장소는 GitHub App을 설치하고 해당 사용자가 앱을 승인한 뒤 PR 최대 30개를 미리 볼 수 있습니다. 앱에 저장소 Pull requests 읽기 권한을 설정하고 콜백 URI `http://127.0.0.1:8765/oauth/github/callback`을 등록하세요. `GITHUB_CLIENT_ID`에는 앱 클라이언트 ID를, `GITHUB_APP_SECRET_ID`에는 로컬 Secrets Manager에 JSON `{"client_secret":"..."}`으로 등록한 앱 비밀의 참조 ID를 설정합니다. 개인 토큰은 입력하지 않습니다. 미리보기는 저장·공유되지 않으며 연결 해제는 로컬 토큰만 삭제합니다. 실제 비밀과 조직 토큰을 LocalStack에 저장하지 마세요. 이 로컬 데모는 GitHub Enterprise를 지원하지 않습니다.
 로컬 모의 테스트에서는 `uv run --no-sync python -c 'from auth.vault import create; print(create({"client_secret":"fake-local-secret"}))'`로 가짜 비밀의 참조 ID를 만들 수 있습니다. 이 예제 값으로 실제 GitHub 인증을 할 수는 없습니다.

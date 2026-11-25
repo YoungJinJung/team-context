@@ -12,7 +12,7 @@ from pathlib import Path
 import connectors
 from storage import persist, search, remove_public_source, cleanup_unavailable, list_public_sources
 from auth.sessions import Sessions
-from auth import linear_preview, teams, teams_preview, gitlab, gitlab_preview, github, github_preview
+from auth import linear_preview, teams, teams_preview, gitlab, gitlab_preview, gitlab_private, github, github_preview
 from botocore.exceptions import BotoCoreError, ClientError
 
 ROOT = Path(__file__).parent
@@ -63,6 +63,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/api/gitlab/private/search":
+            if self.headers.get("Host") != "127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid host"})
+            params = urllib.parse.parse_qs(parsed.query)
+            project = params.get("project", [""])[0]
+            query = params.get("q", [""])[0]
+            try:
+                result = GITLAB_SESSIONS.use(self.cookie("team_context_gitlab_session"), lambda token: gitlab_private.search(token, project, query))
+                return self.send(200, {"items": result})
+            except ValueError:
+                return self.send(400, {"error": "Private search unavailable"})
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+                return self.send(502, {"error": "Unable to search private data"})
         if parsed.path == "/oauth/github/callback":
             if self.headers.get("Host") != "127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid host"})
@@ -221,6 +234,23 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, {"error": "Not found"})
 
     def do_POST(self):
+        if self.path == "/api/gitlab/private/collect":
+            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid origin"})
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 4096:
+                    raise ValueError("Invalid request size")
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict) or not isinstance(payload.get("project"), str):
+                    raise ValueError("Invalid project")
+                with STORAGE_LOCK:
+                    count = GITLAB_SESSIONS.use(self.cookie("team_context_gitlab_session"), lambda token: gitlab_private.collect(token, payload["project"]))
+                return self.send(200, {"count": count})
+            except ValueError:
+                return self.send(400, {"error": "Private collection unavailable"})
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+                return self.send(502, {"error": "Unable to collect private data"})
         if self.path in ("/api/github/start", "/api/github/disconnect"):
             if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid origin"})
