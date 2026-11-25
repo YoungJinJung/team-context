@@ -202,3 +202,27 @@ def test_list_public_sources_does_not_expose_session_metadata():
         s3, db = clients()
         s3.delete_object(Bucket='team-context-records', Key=hashlib.sha256(b'github:local/list-source:pr:9999').hexdigest() + '.json')
         db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': 'github:local/list-source'}})
+
+
+def test_teams_session_is_isolated_from_linear_session():
+    from unittest.mock import patch
+    from urllib.parse import parse_qs, urlsplit
+    from auth import teams, vault
+    from auth.sessions import Sessions
+    initialize()
+    teams_sessions = Sessions(teams.Authorization, teams.refresh, 'teams')
+    linear_sessions = Sessions()
+    cookie, url = teams_sessions.start('client', 'http://127.0.0.1/callback')
+    state = parse_qs(urlsplit(url).query)['state'][0]
+    with patch('auth.teams._token', return_value={'access_token': 'local-access', 'refresh_token': 'local-refresh'}):
+        secret = teams_sessions.complete(cookie, state, 'code')
+    try:
+        assert teams_sessions.connected(cookie)
+        assert Sessions(teams.Authorization, teams.refresh, 'teams').connected(cookie)
+        assert not linear_sessions.connected(cookie)
+        assert teams_sessions.use(cookie, lambda token: token) == 'local-access'
+    finally:
+        teams_sessions.disconnect(cookie)
+    assert not teams_sessions.connected(cookie)
+    from botocore.exceptions import ClientError
+    with pytest.raises(ClientError): vault.read(secret)

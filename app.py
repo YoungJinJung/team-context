@@ -12,13 +12,15 @@ from pathlib import Path
 import connectors
 from storage import persist, search, remove_public_source, cleanup_unavailable, list_public_sources
 from auth.sessions import Sessions
-from auth import linear_preview
+from auth import linear_preview, teams, teams_preview
 from botocore.exceptions import BotoCoreError, ClientError
 
 ROOT = Path(__file__).parent
 SESSIONS = Sessions()
+TEAMS_SESSIONS = Sessions(teams.Authorization, teams.refresh, "teams")
 STORAGE_LOCK = threading.Lock()
 CALLBACK = "http://127.0.0.1:8765/oauth/linear/callback"
+TEAMS_CALLBACK = "http://127.0.0.1:8765/oauth/teams/callback"
 
 
 def discover():
@@ -48,17 +50,52 @@ class Handler(BaseHTTPRequestHandler):
         # Callback query strings contain authorization codes and must not reach logs.
         self.log_message('"%s %s" %s %s', self.command, urllib.parse.urlsplit(self.path).path, str(code), str(size))
 
-    def cookie(self):
+    def cookie(self, name="team_context_session"):
         cookie = http.cookies.SimpleCookie()
         try:
             cookie.load(self.headers.get("Cookie", ""))
-            value = cookie.get("team_context_session")
+            value = cookie.get(name)
             return value.value if value else None
         except http.cookies.CookieError:
             return None
 
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
+        if parsed.path == "/oauth/teams/callback":
+            if self.headers.get("Host") != "127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid host"})
+            values = urllib.parse.parse_qs(parsed.query)
+            if len(values.get("state", [])) != 1 or len(values.get("code", [])) != 1:
+                return self.send(400, {"error": "Invalid callback"})
+            try:
+                TEAMS_SESSIONS.complete(self.cookie("team_context_teams_session"), values["state"][0], values["code"][0])
+            except ValueError:
+                return self.send(400, {"error": "Invalid or expired authorization"})
+            except (OSError, BotoCoreError, ClientError):
+                return self.send(502, {"error": "Authorization failed"})
+            self.send_response(303)
+            self.send_header("Location", "/")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        if parsed.path in ("/api/teams/status", "/api/teams/list", "/api/teams/channels"):
+            if self.headers.get("Host") != "127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid host"})
+            session = self.cookie("team_context_teams_session")
+            try:
+                if parsed.path == "/api/teams/status":
+                    return self.send(200, {"connected": TEAMS_SESSIONS.connected(session)})
+                if parsed.path == "/api/teams/list":
+                    result = TEAMS_SESSIONS.use(session, teams_preview.teams)
+                else:
+                    team = urllib.parse.parse_qs(parsed.query).get("team", [""])[0]
+                    result = TEAMS_SESSIONS.use(session, lambda token: teams_preview.channels(token, team))
+                return self.send(200, {"items": result})
+            except ValueError:
+                return self.send(400, {"error": "Teams preview unavailable"})
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+                return self.send(502, {"error": "Unable to load Teams data"})
         if parsed.path == "/oauth/linear/callback":
             if self.headers.get("Host") != "127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid host"})
@@ -118,6 +155,33 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, {"error": "Not found"})
 
     def do_POST(self):
+        if self.path in ("/api/teams/start", "/api/teams/disconnect"):
+            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid origin"})
+            session = self.cookie("team_context_teams_session")
+            try:
+                if self.path == "/api/teams/disconnect":
+                    TEAMS_SESSIONS.disconnect(session)
+                    return self.send(200, {"connected": False})
+                if TEAMS_SESSIONS.connected(session):
+                    return self.send(409, {"error": "Disconnect the existing connection first."})
+                client_id = os.environ.get("TEAMS_CLIENT_ID")
+                if not client_id:
+                    return self.send(503, {"error": "Set TEAMS_CLIENT_ID to your Entra app client ID."})
+                session, url = TEAMS_SESSIONS.start(client_id, TEAMS_CALLBACK)
+            except ValueError:
+                return self.send(404, {"error": "No connection"})
+            except (OSError, BotoCoreError, ClientError):
+                return self.send(502, {"error": "Unable to manage Teams connection"})
+            body = json.dumps({"url": url}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Set-Cookie", "team_context_teams_session=" + session + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+            return
         if self.path == "/api/cleanup-unavailable":
             if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid origin"})

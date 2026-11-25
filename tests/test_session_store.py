@@ -57,3 +57,18 @@ def test_valid_session_alphabet():
     with patch('auth.session_store.clients', return_value=(Mock(), db)):
         assert session_store.get(valid) is None
     assert db.get_item.call_count == 1
+
+
+def test_namespaced_sessions_cannot_alias_linear_sessions():
+    digest = hashlib.sha256(SESSION.encode()).hexdigest()
+    db = Mock()
+    db.get_item.return_value = {}
+    with patch('auth.session_store.clients', return_value=(Mock(), db)), patch('auth.session_store.time.time', return_value=100):
+        session_store.put(SESSION, 'teams-secret', namespace='teams')
+        session_store.get(SESSION, namespace='teams')
+        session_store.remove(SESSION, namespace='teams')
+    assert db.put_item.call_args.kwargs['Item']['connection_id']['S'] == 'session:teams:' + digest
+    assert db.get_item.call_args.kwargs['Key']['connection_id']['S'] == 'session:teams:' + digest
+    assert db.delete_item.call_args.kwargs['Key']['connection_id']['S'] == 'session:teams:' + digest
+    assert session_store._key(SESSION) == 'session:' + digest
+    with pytest.raises(ValueError, match='Invalid namespace'): session_store.get(SESSION, namespace='other')
