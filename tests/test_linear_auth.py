@@ -27,7 +27,7 @@ def test_authorization_url_and_pkce():
 
 def test_exchange_and_replay():
     auth = Authorization('client', 'http://localhost/callback')
-    with patch('auth.linear.urllib.request.urlopen', return_value=Response(b'{"access_token":"access","refresh_token":"refresh"}')) as urlopen:
+    with patch('auth.linear.open_url', return_value=Response(b'{"access_token":"access","refresh_token":"refresh"}')) as urlopen:
         assert auth.exchange(auth._state, 'code') == {'access_token': 'access', 'refresh_token': 'refresh'}
     request = urlopen.call_args.args[0]
     assert request.full_url == 'https://api.linear.app/oauth/token'
@@ -35,7 +35,7 @@ def test_exchange_and_replay():
     assert request.get_header('Content-type') == 'application/x-www-form-urlencoded'
     assert request.get_header('Accept') == 'application/json'
     assert parse_qs(request.data.decode()) == {'grant_type': ['authorization_code'], 'client_id': ['client'], 'redirect_uri': ['http://localhost/callback'], 'code': ['code'], 'code_verifier': [auth._verifier]}
-    assert urlopen.call_args.kwargs == {'timeout': 15}
+    assert urlopen.call_args.kwargs == {}
     with pytest.raises(ValueError): auth.exchange(auth._state, 'code')
 
 
@@ -62,14 +62,14 @@ def test_concurrent_exchange_only_once():
 
 
 def test_refresh():
-    with patch('auth.linear.urllib.request.urlopen', return_value=Response(b'{"access_token":"new","refresh_token":"next"}')) as urlopen:
+    with patch('auth.linear.open_url', return_value=Response(b'{"access_token":"new","refresh_token":"next"}')) as urlopen:
         assert refresh('client', 'old') == {'access_token': 'new', 'refresh_token': 'next'}
     assert parse_qs(urlopen.call_args.args[0].data.decode()) == {'grant_type': ['refresh_token'], 'client_id': ['client'], 'refresh_token': ['old']}
 
 
 @pytest.mark.parametrize('payload', [{}, {'access_token': '', 'refresh_token': 'r'}, {'access_token': 'a', 'refresh_token': ''}, {'access_token': 1, 'refresh_token': 'r'}, {'access_token': 'a', 'refresh_token': 1}])
 def test_invalid_token_response(payload):
-    with patch('auth.linear.urllib.request.urlopen', return_value=Response(json.dumps(payload).encode())):
+    with patch('auth.linear.open_url', return_value=Response(json.dumps(payload).encode())):
         with pytest.raises(ValueError, match='^Invalid token response$'): refresh('client', 'old')
 
 

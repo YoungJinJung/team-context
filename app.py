@@ -11,6 +11,7 @@ from pathlib import Path
 import connectors
 from storage import persist, search
 from auth.sessions import Sessions
+from auth import linear_preview
 from botocore.exceptions import BotoCoreError, ClientError
 
 ROOT = Path(__file__).parent
@@ -37,6 +38,7 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(data)))
         self.send_header("X-Content-Type-Options", "nosniff")
+        self.send_header("Cache-Control", "no-store")
         self.end_headers()
         self.wfile.write(data)
 
@@ -81,6 +83,20 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": str(error)})
             except (OSError, BotoCoreError, ClientError):
                 return self.send(502, {"error": "Unable to search local storage."})
+        if parsed.path in ("/api/linear/teams", "/api/linear/issues"):
+            if self.headers.get("Host") != "127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid host"})
+            try:
+                if parsed.path == "/api/linear/teams":
+                    result = SESSIONS.use(self.cookie(), linear_preview.teams)
+                else:
+                    team = urllib.parse.parse_qs(parsed.query).get("team", [""])[0]
+                    result = SESSIONS.use(self.cookie(), lambda token: linear_preview.issues(token, team))
+                return self.send(200, {"items": result})
+            except ValueError:
+                return self.send(400, {"error": "Linear preview unavailable"})
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+                return self.send(502, {"error": "Unable to load Linear data"})
         if self.path == "/api/linear/status":
             try:
                 return self.send(200, {"connected": SESSIONS.connected(self.cookie())})

@@ -7,6 +7,7 @@ import threading
 import time
 import urllib.parse
 import urllib.request
+from auth.transport import open_url
 
 
 class Authorization:
@@ -40,7 +41,7 @@ def refresh(client_id, refresh_token):
 
 def _token(fields):
     request = urllib.request.Request('https://api.linear.app/oauth/token', data=urllib.parse.urlencode(fields).encode(), headers={'Content-Type': 'application/x-www-form-urlencoded', 'Accept': 'application/json'}, method='POST')
-    with urllib.request.urlopen(request, timeout=15) as response:
+    with open_url(request) as response:
         tokens = json.load(response)
     if not isinstance(tokens.get('access_token'), str) or not tokens['access_token'] or not isinstance(tokens.get('refresh_token'), str) or not tokens['refresh_token']:
         raise ValueError('Invalid token response')

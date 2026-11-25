@@ -255,3 +255,30 @@ def test_linear_connection_store_failure_returns_safe_error(client):
         assert response.status == 502
         assert json.loads(data) == {'error': 'Unable to read connection status'}
         assert b'secret-details' not in data
+
+
+def test_linear_preview_requires_local_host_and_session(client):
+    from unittest.mock import Mock
+    headers = {'Host': '127.0.0.1:8765', 'Cookie': 'team_context_session=valid'}
+    with patch('app.SESSIONS.use', return_value=[{'id': 'id', 'name': 'team'}]) as use:
+        response, body = request(client, 'GET', '/api/linear/teams', headers=headers)
+        assert response.status == 200 and json.loads(body) == {'items': [{'id': 'id', 'name': 'team'}]}
+        assert response.getheader('Cache-Control') == 'no-store'
+        assert use.call_args.args == ('valid', app.linear_preview.teams)
+    response, _ = request(client, 'GET', '/api/linear/teams', headers={'Host': 'evil.example'})
+    assert response.status == 403
+    for error, status, message in [(ValueError('private'), 400, 'Linear preview unavailable'), (OSError('private'), 502, 'Unable to load Linear data'), (KeyError('private'), 502, 'Unable to load Linear data')]:
+        with patch('app.SESSIONS.use', side_effect=error):
+            response, body = request(client, 'GET', '/api/linear/teams', headers=headers)
+        assert response.status == status and json.loads(body) == {'error': message} and b'private' not in body
+
+
+def test_linear_preview_passes_selected_team_and_session(client):
+    headers = {'Host': '127.0.0.1:8765', 'Cookie': 'team_context_session=valid'}
+    def use(session, operation):
+        assert session == 'valid'
+        return operation('short-lived')
+    with patch('app.SESSIONS.use', side_effect=use), patch('app.linear_preview.issues', return_value=[{'title': 'sample'}]) as issues:
+        response, body = request(client, 'GET', '/api/linear/issues?team=selected-team', headers=headers)
+    assert response.status == 200 and json.loads(body) == {'items': [{'title': 'sample'}]}
+    issues.assert_called_once_with('short-lived', 'selected-team')

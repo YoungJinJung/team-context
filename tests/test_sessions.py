@@ -113,3 +113,13 @@ def test_disconnect_missing_session_error():
     sessions = Sessions()
     with pytest.raises(ValueError, match='^No connection$'):
         sessions.disconnect('missing')
+
+
+def test_use_only_reads_current_session_secret():
+    sessions = Sessions()
+    session, _ = sessions.start('client', 'http://127.0.0.1/callback')
+    with patch('auth.sessions.Authorization.exchange', return_value={}), patch('auth.sessions.vault.create', return_value='secret'), patch('auth.sessions.vault.read', return_value={'access_token': 'private'}) as read:
+        sessions.complete(session, 'state', 'code')
+        assert sessions.use(session, lambda token: token + '-result') == 'private-result'
+        read.assert_called_once_with('secret')
+        with pytest.raises(ValueError, match='No connection'): sessions.use('other', lambda token: token)
