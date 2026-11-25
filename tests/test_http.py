@@ -240,9 +240,10 @@ def test_search_http_api(client):
     with patch('app.search', side_effect=ValueError('bad query')):
         response, body = request(client, 'GET', '/api/search?q=x')
     assert response.status == 400 and json.loads(body) == {'error': 'bad query'}
-    with patch('app.search', side_effect=OSError('private error')):
-        response, body = request(client, 'GET', '/api/search?q=word')
-    assert response.status == 502 and json.loads(body) == {'error': 'Unable to search local storage.'}
+    for error in (OSError('private error'), KeyError('private error'), TypeError('private error')):
+        with patch('app.search', side_effect=error):
+            response, body = request(client, 'GET', '/api/search?q=word')
+        assert response.status == 502 and json.loads(body) == {'error': 'Unable to search local storage.'}
 
 
 def test_linear_connection_store_failure_returns_safe_error(client):
