@@ -56,3 +56,19 @@ def test_browser_session_with_real_local_secrets_manager():
     assert not sessions.connected(cookie)
     from botocore.exceptions import ClientError
     with pytest.raises(ClientError): vault.read(secret_id)
+
+
+def test_search_returns_public_records_from_s3():
+    import storage
+    initialize()
+    unique = 'integration-search-example'
+    records = [{'id': unique + '-public', 'title': unique, 'body': 'hello', 'visibility': 'public'}, {'id': unique + '-private', 'title': unique, 'body': 'secret', 'visibility': 'private'}]
+    persist('search:test', records)
+    try:
+        assert storage.search(unique) == records[:1]
+    finally:
+        s3, db = clients()
+        for record in records:
+            key = hashlib.sha256(record['id'].encode()).hexdigest() + '.json'
+            s3.delete_object(Bucket='team-context-records', Key=key)
+        db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': 'search:test'}})

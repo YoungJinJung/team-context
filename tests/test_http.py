@@ -229,3 +229,17 @@ def test_linear_cannot_replace_existing_connection(client):
         response, data = request(client, 'POST', '/api/linear/start', '', {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'})
     assert response.status == 409 and json.loads(data) == {'error': 'Disconnect the existing connection first.'}
     start.assert_not_called()
+
+
+def test_search_http_api(client):
+    records = [{'title': 'one', 'url': 'https://example.com', 'visibility': 'public'}]
+    with patch('app.search', return_value=records) as search:
+        response, body = request(client, 'GET', '/api/search?q=team%20context')
+    assert response.status == 200 and json.loads(body) == {'records': records}
+    search.assert_called_once_with('team context')
+    with patch('app.search', side_effect=ValueError('bad query')):
+        response, body = request(client, 'GET', '/api/search?q=x')
+    assert response.status == 400 and json.loads(body) == {'error': 'bad query'}
+    with patch('app.search', side_effect=OSError('private error')):
+        response, body = request(client, 'GET', '/api/search?q=word')
+    assert response.status == 502 and json.loads(body) == {'error': 'Unable to search local storage.'}

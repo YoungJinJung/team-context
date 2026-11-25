@@ -38,7 +38,7 @@ class ConnectorContractTest(unittest.TestCase):
         payload = [{'number': 7, 'title': 'Fix', 'html_url': 'https://github.com/Org/Repo/pull/7', 'updated_at': 'now', 'body': 'description'}]
         urlopen.return_value = Response(json.dumps(payload).encode())
         result = github.collect({'repository': 'Org/Repo'})
-        self.assertEqual(result, [{'id': 'github:org/repo:pr:7', 'type': 'pull_request', 'title': 'Fix', 'url': payload[0]['html_url'], 'updated_at': 'now', 'body': 'description'}])
+        self.assertEqual(result, [{'id': 'github:org/repo:pr:7', 'visibility': 'public', 'type': 'pull_request', 'title': 'Fix', 'url': payload[0]['html_url'], 'updated_at': 'now', 'body': 'description'}])
         req = urlopen.call_args.args[0]
         self.assertEqual(req.full_url, 'https://api.github.com/repos/Org/Repo/pulls?state=all&per_page=30')
         self.assertEqual(req.get_header('Accept'), 'application/vnd.github+json')

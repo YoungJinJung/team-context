@@ -22,4 +22,4 @@ def collect(config):
     request = urllib.request.Request(url, headers={'Accept': 'application/json', 'User-Agent': 'team-context-mvp'})
     with urllib.request.urlopen(request, timeout=15) as response:
         merges = json.load(response)
-    return [{'id': f"gitlab:{project.lower()}:mr:{item['iid']}", 'type': 'merge_request', 'title': item['title'], 'url': item['web_url'], 'updated_at': item['updated_at'], 'body': item.get('description') or ''} for item in merges]
+    return [{'id': f"gitlab:{project.lower()}:mr:{item['iid']}", 'visibility': 'public', 'type': 'merge_request', 'title': item['title'], 'url': item['web_url'], 'updated_at': item['updated_at'], 'body': item.get('description') or ''} for item in merges]
