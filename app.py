@@ -5,17 +5,19 @@ import os
 import http.cookies
 import urllib.parse
 import pkgutil
+import threading
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import connectors
-from storage import persist, search
+from storage import persist, search, remove_public_source
 from auth.sessions import Sessions
 from auth import linear_preview
 from botocore.exceptions import BotoCoreError, ClientError
 
 ROOT = Path(__file__).parent
 SESSIONS = Sessions()
+STORAGE_LOCK = threading.Lock()
 CALLBACK = "http://127.0.0.1:8765/oauth/linear/callback"
 
 
@@ -140,7 +142,7 @@ class Handler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(body)
             return
-        if self.path != "/api/collect":
+        if self.path not in ("/api/collect", "/api/remove-source"):
             return self.send(404, {"error": "Not found"})
         if self.headers.get("Origin") not in (None, "http://127.0.0.1:8765", "http://localhost:8765"):
             return self.send(403, {"error": "Invalid origin"})
@@ -152,9 +154,16 @@ class Handler(BaseHTTPRequestHandler):
             module = discover().get(payload.get("connector"))
             if module is None or not isinstance(payload.get("config"), dict):
                 raise ValueError("Invalid connector or configuration")
-            records = module.collect(payload["config"])
-            persist(module.connection_id(payload["config"]), records)
-            self.send(200, {"records": records})
+            with STORAGE_LOCK:
+                if self.path == "/api/remove-source":
+                    if payload["connector"] not in ("github", "gitlab"):
+                        raise ValueError("Unsupported source")
+                    count = remove_public_source(module.connection_id(payload["config"]))
+                    self.send(200, {"removed": count})
+                else:
+                    records = module.collect(payload["config"])
+                    persist(module.connection_id(payload["config"]), records)
+                    self.send(200, {"records": records})
         except (ValueError, TypeError, json.JSONDecodeError) as exc:
             self.send(400, {"error": str(exc)})
         except (urllib.error.URLError, TimeoutError, OSError, BotoCoreError, ClientError):

@@ -1,4 +1,5 @@
 import http.client
+from concurrent.futures import ThreadPoolExecutor
 import json
 import threading
 from http.server import ThreadingHTTPServer
@@ -283,3 +284,44 @@ def test_linear_preview_passes_selected_team_and_session(client):
         response, body = request(client, 'GET', '/api/linear/issues?team=selected-team', headers=headers)
     assert response.status == 200 and json.loads(body) == {'items': [{'title': 'sample'}]}
     issues.assert_called_once_with('short-lived', 'selected-team')
+
+
+def test_remove_source_requires_allowed_origin_and_validated_source(client):
+    body = json.dumps({'connector': 'github', 'config': {'repository': 'A/B'}})
+    with patch('app.remove_public_source', return_value=2) as remove:
+        response, data = request(client, 'POST', '/api/remove-source', body, {'Origin': 'http://127.0.0.1:8765'})
+    assert response.status == 200 and json.loads(data) == {'removed': 2}
+    remove.assert_called_once_with('github:a/b')
+    response, _ = request(client, 'POST', '/api/remove-source', body, {'Origin': 'https://evil.example'})
+    assert response.status == 403
+    with patch('app.remove_public_source', side_effect=OSError('failed')):
+        response, _ = request(client, 'POST', '/api/remove-source', body)
+    assert response.status == 502
+
+
+def test_collection_and_removal_do_not_race(client):
+    import time
+    entered = threading.Event()
+    release = threading.Event()
+    removal_started = threading.Event()
+    body = json.dumps({'connector': 'github', 'config': {'repository': 'a/b'}})
+    def collect(config):
+        entered.set()
+        assert release.wait(3)
+        return []
+    def remove(connection):
+        removal_started.set()
+        return 0
+    second = http.client.HTTPConnection(client.host, client.port, timeout=5)
+    with patch('connectors.github.collect', side_effect=collect), patch('app.persist'), patch('app.remove_public_source', side_effect=remove):
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            first = pool.submit(request, client, 'POST', '/api/collect', body)
+            assert entered.wait(2)
+            other = pool.submit(request, second, 'POST', '/api/remove-source', body)
+            time.sleep(0.05)
+            assert not removal_started.is_set()
+            release.set()
+            assert first.result()[0].status == 200
+            assert other.result()[0].status == 200
+            assert removal_started.is_set()
+    second.close()
