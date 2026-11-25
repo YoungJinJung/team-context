@@ -10,7 +10,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import connectors
-from storage import persist, search, remove_public_source, cleanup_unavailable
+from storage import persist, search, remove_public_source, cleanup_unavailable, list_public_sources
 from auth.sessions import Sessions
 from auth import linear_preview
 from botocore.exceptions import BotoCoreError, ClientError
@@ -77,6 +77,13 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if parsed.path == "/api/sources":
+            if self.headers.get("Host") != "127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid host"})
+            try:
+                return self.send(200, {"sources": list_public_sources()})
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+                return self.send(502, {"error": "Unable to list local sources"})
         if parsed.path == "/api/search":
             query = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
             try:
