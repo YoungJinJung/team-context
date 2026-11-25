@@ -2,6 +2,7 @@
 import hashlib
 import json
 import boto3
+from source_verification import current
 
 
 def clients():
@@ -30,7 +31,7 @@ def search(query):
             record = json.loads(body)
             if record.get('visibility') != 'public':
                 continue
-            if query in (record.get('title', '') + ' ' + record.get('body', '')).casefold():
+            if query in (record.get('title', '') + ' ' + record.get('body', '')).casefold() and current(record):
                 results.append(record)
                 if len(results) == 30:
                     return results

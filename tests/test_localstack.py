@@ -71,7 +71,9 @@ def test_search_returns_public_records_from_s3():
     records = [{'id': unique + '-public', 'title': unique, 'body': 'hello', 'visibility': 'public'}, {'id': unique + '-private', 'title': unique, 'body': 'secret', 'visibility': 'private'}]
     persist('search:test', records)
     try:
-        assert storage.search(unique) == records[:1]
+        from unittest.mock import patch
+        with patch("storage.current", return_value=True):
+            assert storage.search(unique) == records[:1]
     finally:
         s3, db = clients()
         for record in records:
@@ -112,3 +114,27 @@ def test_local_token_refresh_persists_replacement_pair():
         assert vault.read(secret) == {'access_token': 'new', 'refresh_token': 'new-refresh', 'client_id': 'public-client'}
     finally:
         sessions.disconnect(session)
+
+
+def test_search_revalidates_local_record_before_return():
+    from unittest.mock import patch
+    import io
+    import storage
+    initialize()
+    record = {'id': 'github:local/example:pr:123456789', 'visibility': 'public', 'type': 'pull_request', 'title': 'Local unique verification example', 'url': 'https://github.com/local/example/pull/123456789', 'updated_at': 'time', 'body': 'body'}
+    provider = {'number': 123456789, 'title': record['title'], 'html_url': record['url'], 'updated_at': record['updated_at'], 'body': record['body']}
+    class Response(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self, *args): self.close()
+    persist('github:local/example', [record])
+    try:
+        with patch('source_verification.open_url', return_value=Response(json.dumps(provider).encode())):
+            assert storage.search('Local unique verification example') == [record]
+        provider['title'] = 'Changed'
+        with patch('source_verification.open_url', return_value=Response(json.dumps(provider).encode())):
+            assert storage.search('Local unique verification example') == []
+    finally:
+        s3, db = clients()
+        key = hashlib.sha256(record['id'].encode()).hexdigest() + '.json'
+        s3.delete_object(Bucket='team-context-records', Key=key)
+        db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S': 'github:local/example'}})

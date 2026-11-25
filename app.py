@@ -81,7 +81,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {"records": search(query)})
             except ValueError as error:
                 return self.send(400, {"error": str(error)})
-            except (OSError, BotoCoreError, ClientError):
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
                 return self.send(502, {"error": "Unable to search local storage."})
         if parsed.path in ("/api/linear/teams", "/api/linear/issues"):
             if self.headers.get("Host") != "127.0.0.1:8765":
