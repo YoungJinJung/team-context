@@ -9,7 +9,7 @@ import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import connectors
-from storage import persist
+from storage import persist, search
 from auth.sessions import Sessions
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -73,6 +73,14 @@ class Handler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", "0")
             self.end_headers()
             return
+        if parsed.path == "/api/search":
+            query = urllib.parse.parse_qs(parsed.query).get("q", [""])[0]
+            try:
+                return self.send(200, {"records": search(query)})
+            except ValueError as error:
+                return self.send(400, {"error": str(error)})
+            except (OSError, BotoCoreError, ClientError):
+                return self.send(502, {"error": "Unable to search local storage."})
         if self.path == "/api/linear/status":
             return self.send(200, {"connected": SESSIONS.connected(self.cookie())})
         if self.path == "/":

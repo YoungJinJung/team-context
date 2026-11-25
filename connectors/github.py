@@ -20,4 +20,4 @@ def collect(config):
     request = urllib.request.Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "team-context-mvp"})
     with urllib.request.urlopen(request, timeout=15) as response:
         pulls = json.load(response)
-    return [{"id": f"github:{repository.lower()}:pr:{p['number']}", "type": "pull_request", "title": p["title"], "url": p["html_url"], "updated_at": p["updated_at"], "body": p.get("body") or ""} for p in pulls]
+    return [{"id": f"github:{repository.lower()}:pr:{p['number']}", "visibility": "public", "type": "pull_request", "title": p["title"], "url": p["html_url"], "updated_at": p["updated_at"], "body": p.get("body") or ""} for p in pulls]

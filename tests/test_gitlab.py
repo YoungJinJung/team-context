@@ -27,7 +27,7 @@ def test_collect_maps_records_and_encodes_nested_project(urlopen):
     urlopen.return_value = Response(json.dumps(merges).encode())
     config = {'project': 'Group/Sub/Repo'}
     assert gitlab.connection_id(config) == 'gitlab:group/sub/repo'
-    assert gitlab.collect(config) == [{'id': 'gitlab:group/sub/repo:mr:12', 'type': 'merge_request', 'title': 'Fix bug', 'url': merges[0]['web_url'], 'updated_at': 'today', 'body': 'details'}, {'id': 'gitlab:group/sub/repo:mr:13', 'type': 'merge_request', 'title': 'Empty', 'url': merges[1]['web_url'], 'updated_at': 'later', 'body': ''}]
+    assert gitlab.collect(config) == [{'id': 'gitlab:group/sub/repo:mr:12', 'visibility': 'public', 'type': 'merge_request', 'title': 'Fix bug', 'url': merges[0]['web_url'], 'updated_at': 'today', 'body': 'details'}, {'id': 'gitlab:group/sub/repo:mr:13', 'visibility': 'public', 'type': 'merge_request', 'title': 'Empty', 'url': merges[1]['web_url'], 'updated_at': 'later', 'body': ''}]
     req = urlopen.call_args.args[0]
     assert req.full_url == 'https://gitlab.com/api/v4/projects/Group%2FSub%2FRepo/merge_requests?scope=all&per_page=30'
     assert req.get_header('Accept') == 'application/json'
