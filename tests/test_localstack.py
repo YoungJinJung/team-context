@@ -144,7 +144,7 @@ def test_remove_only_selected_public_source():
     import storage
     initialize()
     ids = ['github:local/remove-this:pr:888888', 'github:local/keep-this:pr:888888']
-    records = [{'id': identifier, 'title': 'test'} for identifier in ids]
+    records = [{'id': identifier, 'title': 'test', 'visibility': 'public'} for identifier in ids]
     persist('github:local/remove-this', records[:1])
     persist('github:local/keep-this', records[1:])
     s3, db = clients()
@@ -281,3 +281,22 @@ def test_github_app_secret_and_session_are_isolated():
         with pytest.raises(ClientError): vault.read(user_secret)
     finally:
         vault.delete(app_secret)
+
+
+def test_public_source_removal_preserves_nonpublic_records():
+    import storage
+    initialize()
+    ids = ['github:local/boundary:pr:188881', 'github:local/boundary:pr:188882', 'github:local/boundary:pr:188883']
+    records = [{'id':ids[0], 'visibility':'public'}, {'id':ids[1], 'visibility':'private'}, {'id':ids[2]}]
+    persist('github:local/boundary', records)
+    s3, db = clients()
+    keys = [hashlib.sha256(identifier.encode()).hexdigest() + '.json' for identifier in ids]
+    try:
+        assert storage.remove_public_source('github:local/boundary') == 1
+        from botocore.exceptions import ClientError
+        with pytest.raises(ClientError): s3.get_object(Bucket='team-context-records', Key=keys[0])
+        for record, key in zip(records[1:], keys[1:]):
+            assert json.loads(s3.get_object(Bucket='team-context-records', Key=key)['Body'].read()) == record
+    finally:
+        for key in keys: s3.delete_object(Bucket='team-context-records', Key=key)
+        db.delete_item(TableName='team-context-sync', Key={'connection_id': {'S':'github:local/boundary'}})
