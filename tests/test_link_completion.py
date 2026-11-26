@@ -10,7 +10,7 @@ pytest.importorskip('coa_common')
 from botocore.exceptions import ClientError
 from auth.coa_identity import Principal
 from auth.link_attempts import ConsumedAttempt
-from auth.link_completion import LinkCompletion, _secret_name
+from auth.link_completion import LinkCompletion, _secret_name, _valid_secret, _read_response, MAX_RESPONSE
 
 PRINCIPAL=Principal('https://issuer.example','user-a')
 GITHUB=ConsumedAttempt(PRINCIPAL,'github','client-id','https://link.example/oauth/github/callback','v'*64)
@@ -42,6 +42,8 @@ def test_github_code_exchange_uses_fixed_hosts_and_stores_only_owner_secret(setu
     assert token_request.get_header('Content-type')=='application/x-www-form-urlencoded' and token_request.get_header('Accept')=='application/json'
     assert parse_qs(token_request.data.decode()) == {'grant_type':['authorization_code'],'client_id':['client-id'],'redirect_uri':['https://link.example/oauth/github/callback'],'code':['one-use-code'],'code_verifier':['v'*64],'client_secret':['app-secret']}
     assert user_request.full_url=='https://api.github.com/user' and user_request.get_header('Authorization')=='Bearer short-lived-access'
+    assert user_request.get_header('Accept')=='application/json'
+    assert user_request.get_header('User-agent')=='team-context-mvp'
     saved=secrets.create_secret.call_args.kwargs
     assert saved['Name']==_secret_name('team-context/links/',PRINCIPAL,'github') and saved['KmsKeyId']=='kms-key'
     assert 'user-a' not in saved['Name'] and 'short-lived-access' not in saved['Name']
@@ -151,3 +153,36 @@ def test_large_response_is_rejected(setup):
     with patch('auth.link_completion.open_url',return_value=Response(b'x'*65537)):
         with pytest.raises(ValueError,match='^Unable to complete account link$'): service.complete('Bearer coa','github','state','nonce','code')
     secrets.create_secret.assert_not_called()
+
+
+@pytest.mark.parametrize('value,valid', [('!',True),('~',True),('x'*16384,True),('x'*16385,False),('\x7f',False),('é',False)])
+def test_provider_credential_validation_boundaries(value,valid):
+    assert _valid_secret(value) is valid
+
+
+@pytest.mark.parametrize('key,prefix,app', [('', 'links/', None), ('key', None, None), ('key', 'bad prefix/', None), ('key', 'links/', ''), ('key', 'links/', 'bad\nsecret')])
+def test_invalid_server_configuration_fails_closed(key,prefix,app):
+    with pytest.raises(ValueError,match='^Invalid link configuration$'):
+        LinkCompletion(Mock(),Mock(),Mock(),key,prefix,app)
+
+
+def test_response_limit_allows_the_boundary_but_rejects_extra_bytes():
+    body=b'{}'+b' '*(MAX_RESPONSE-2)
+    with patch('auth.link_completion.open_url',return_value=Response(body)):
+        assert _read_response(Mock())=={}
+    with patch('auth.link_completion.open_url',return_value=Response(body+b' ')):
+        with pytest.raises(ValueError): _read_response(Mock())
+
+
+@pytest.mark.parametrize('expiry',[1,86400])
+def test_expiring_token_boundaries_are_accepted(setup,expiry):
+    service,_,_,_=setup
+    tokens={**TOKENS,'expires_in':expiry}
+    with patch('auth.link_completion.open_url',side_effect=[Response(json.dumps(tokens).encode()),Response(b'{"id":1}')]):
+        assert service.complete('Bearer coa','github','state','nonce','code')=={'connected':True}
+
+
+def test_longest_allowed_authorization_code_is_accepted(setup):
+    service,_,_,_=setup
+    with patch('auth.link_completion.open_url',side_effect=[Response(json.dumps(TOKENS).encode()),Response(b'{"id":1}')]):
+        assert service.complete('Bearer coa','github','state','nonce','x'*2048)=={'connected':True}
