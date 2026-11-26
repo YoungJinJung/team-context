@@ -93,17 +93,21 @@ This fake secret cannot authenticate with GitHub. Provider tokens can refresh af
 
 ## Private snapshots
 
-GitHub private PR snapshots use a separate local S3 key space keyed by immutable repository ID. Collection checks the current user’s repository access, reads up to ten data pages plus an empty confirmation page, and commits a snapshot only after the full read succeeds. Search rechecks the requester’s repository access and every matching original PR. Snapshots larger than 2 MiB are rejected. These local snapshots are not automatically cleaned up, and there is no operator cleanup command for GitHub yet.
+GitHub private PR snapshots use a separate local S3 key space keyed by immutable repository ID. Collection checks the current user’s repository access, reads up to ten data pages plus an empty confirmation page, and commits a snapshot only after the full read succeeds. Search rechecks the requester’s repository access and every matching original PR. Snapshots larger than 2 MiB are rejected. These local snapshots are not automatically cleaned up.
 
 ### GitLab snapshots
 
 Private GitLab snapshots use a separate local S3 key space. A collection verifies the user's project access, reads up to ten data pages plus an empty confirmation page, and writes one snapshot only after the read succeeds. It rejects a snapshot larger than 2 MiB. Source changes during pagination can still cause omissions, so recollection may be necessary.
 
-A local operator can list project IDs and request deletion of one snapshot, including after the original user's access is revoked. Stop the server before removing a snapshot; a later collection can recreate it.
+A local operator can list project or repository IDs and request deletion of one snapshot, including after the original user's access is revoked. Stop the server before removing a snapshot; a later collection can recreate it.
 
 ```sh
 uv run --no-sync python -m scripts.private_snapshots list
 uv run --no-sync python -m scripts.private_snapshots remove 123 --confirm
+
+# GitHub requires an explicit provider; 123 is the repository ID.
+uv run --no-sync python -m scripts.private_snapshots list --provider github
+uv run --no-sync python -m scripts.private_snapshots remove 123 --provider github --confirm
 ```
 
 This command is for an operator with access to the local emulator. It is not a multi-user administration or retention policy. Public-source deletion preserves records whose visibility is private or unknown.
@@ -130,6 +134,6 @@ CI requires a backend mutation score of at least 90%, calculated as killed mutan
 
 ## Roadmap and contributions
 
-The next steps include GitHub private snapshot lifecycle management, self-hosted source support, Jira and Confluence content collection, Teams message collection, source permission and deletion synchronization, a pluggable authorization contract, authenticated multi-user MCP, AWS deployment, and COA integration. Browse the [open issues](https://github.com/YoungJinJung/team-context/issues) for current work and limitations.
+The next steps include automated private snapshot retention and cleanup, self-hosted source support, Jira and Confluence content collection, Teams message collection, source permission and deletion synchronization, a pluggable authorization contract, authenticated multi-user MCP, AWS deployment, and COA integration. Browse the [open issues](https://github.com/YoungJinJung/team-context/issues) for current work and limitations.
 
 The current public connector contract and development workflow are documented in the [connector guide](docs/connectors.md). Contributions should include tests for new behavior and describe what was validated. The project is licensed under the [MIT License](LICENSE); AWS service icons are attributed separately in [docs/assets](docs/assets/README.md).

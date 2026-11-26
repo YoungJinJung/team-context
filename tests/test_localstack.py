@@ -456,3 +456,26 @@ def test_github_private_snapshot_requires_requester_and_revalidates_original():
         assert json.loads(s3.get_object(Bucket='team-context-records',Key=key)['Body'].read())['visibility'] == 'private'
     finally:
         s3.delete_object(Bucket='team-context-records',Key=key)
+
+
+def test_github_operator_cleanup_keeps_gitlab_and_public_records():
+    from uuid import uuid4
+    from botocore.exceptions import ClientError
+    from scripts import private_snapshots
+    identifier = int(uuid4().hex[:10],16) or 1
+    github_key = f'private/github/{identifier}.json'
+    gitlab_key = f'private/gitlab/{identifier}.json'
+    public_key = uuid4().hex + '.json'
+    s3, _ = clients()
+    for key in (github_key,gitlab_key,public_key):
+        s3.put_object(Bucket='team-context-records',Key=key,Body=b'{"fixture":true}')
+    try:
+        assert identifier in private_snapshots.list_ids('github')
+        assert identifier in private_snapshots.list_ids('gitlab')
+        private_snapshots.remove(identifier,'github')
+        with pytest.raises(ClientError): s3.get_object(Bucket='team-context-records',Key=github_key)
+        assert s3.get_object(Bucket='team-context-records',Key=gitlab_key)['Body'].read() == b'{"fixture":true}'
+        assert s3.get_object(Bucket='team-context-records',Key=public_key)['Body'].read() == b'{"fixture":true}'
+        private_snapshots.remove(identifier,'github')
+    finally:
+        for key in (github_key,gitlab_key,public_key): s3.delete_object(Bucket='team-context-records',Key=key)
