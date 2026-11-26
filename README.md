@@ -8,6 +8,10 @@ Connect the documents, code changes, tickets, and conversations your team uses e
 
 The diagram is a **proposed AWS architecture**, not the current deployment. See the [shareable architecture page](https://youngjinjung.github.io/team-context/) for the low-cost MVP and the COA-based option, or read the [architecture and cost notes](docs/architecture.md).
 
+## COA and private data
+
+[AWS Context Ontology Accelerator](https://github.com/aws/context-ontology-accelerator) has its own MCP server and OIDC/Cognito and Cedar authorization. Team Context's local MCP is a separate public-search prototype; this repository does not yet connect to COA. COA namespace permissions alone do not establish that a requester can access each original GitHub, GitLab, Jira, Confluence, or Teams item. Identity-to-connector binding, source permission checks, derived-data provenance, and deletion and revocation propagation remain open in [issue #68](https://github.com/YoungJinJung/team-context/issues/68). Do not use the prototype to serve company private data.
+
 ## What works today
 
 | Source | Available in the local prototype | Not available yet |

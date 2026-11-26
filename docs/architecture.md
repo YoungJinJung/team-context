@@ -27,6 +27,8 @@
 - **Model**: OWL/RDF·SHACL 모델과 관계를 구성하고 Neptune에 지식 그래프를 저장합니다. COA는 AI 보조 온톨로지 제안에 사람의 검토 기능을 제공합니다. 이 기능은 초기 MVP의 필수 승인 절차가 아닙니다.
 - **Serve**: OpenSearch Serverless로 검색하고 COA Serve/MCP 런타임으로 결과와 근거를 제공합니다. COA의 정책·세션 등은 DynamoDB를 사용합니다.
 
+COA [v0.3.11의 MCP 서버](https://github.com/aws/context-ontology-accelerator/blob/v0.3.11/packages/mcp-server/README.md)는 AgentCore Runtime에서 `query`, `rag_retrieval`, `graph_traversal` 등을 제공하고 요청자 JWT 및 Cedar 권한을 처리합니다. COA는 자체 Cognito 또는 [외부 OIDC와 연동](https://github.com/aws/context-ontology-accelerator/blob/v0.3.11/external-docs/content/authentication-setup.md)할 수 있습니다. Entra는 가능한 IdP 후보이며, 별도의 Entra 검증기를 중복 구현하기 전에 선택한 COA 릴리스의 실제 연동을 검증합니다. 현재 이 저장소의 로컬 stdio MCP는 공개 검색 데모이며 COA MCP와 별개입니다.
+
 COA의 권한 기능을 설치하는 것만으로 GitHub, GitLab, Jira, Confluence 또는 Teams의 원본 ACL이 자동으로 보존된다고 가정하지 않습니다. 공급자별 사용자 식별자 매핑, 테넌트 경계, 문서·스레드 단위 권한, 삭제·권한 회수 전파와 접근 실패 시 차단을 별도로 구현하고 검증해야 합니다. 이메일 주소가 같다는 이유만으로 서로 다른 서비스 계정을 자동 연결하지 않습니다.
 
 ## 현재 구현 현황
@@ -42,11 +44,21 @@ COA의 권한 기능을 설치하는 것만으로 GitHub, GitLab, Jira, Confluen
 | Jira · Confluence | 미리보기 | Atlassian OAuth로 사이트와 부여된 제품 범위를 확인. 문서·티켓 수집과 개별 항목 권한 검증은 미구현. |
 | 자체 호스팅 | 미구현 | GitHub Enterprise·자체 호스팅 GitLab 지원 예정. |
 | 인증·접근 | 로컬 실험 | 공급자별 세션과 로컬 토큰 저장. 운영용 사용자/테넌트 격리, 중앙 감사, 자동 권한·삭제 전파는 미구현. |
-| 온톨로지 · AWS 배포 | 미구현 | COA, MCP, Neptune, OpenSearch, AWS IaC 및 배포는 미구현. |
+| 온톨로지 · AWS 배포 | 미구현 | COA 연동, Neptune, OpenSearch, AWS IaC 및 배포는 미구현. |
 
-공개 커넥터는 `connectors/`의 `MANIFEST`, `connection_id`, `collect` 계약으로 자동 탐색합니다. OAuth 연결과 비공개 검색은 아직 같은 플러그인 계약으로 일반화되어 있지 않습니다. 관련 작업은 [#53](https://github.com/YoungJinJung/team-context/issues/53)에서 추적합니다.
+공개 커넥터는 `connectors/`의 `MANIFEST`, `connection_id`, `collect` 계약으로 자동 탐색합니다. OAuth 연결 수명주기는 명시적 공급자 레지스트리를 사용합니다. 공급자별 미리보기와 비공개 검색은 별도 구현합니다.
 
 공개 검색은 결과를 반환하기 전 익명으로 원본을 재확인합니다. 비공개 GitLab 검색은 해당 사용자의 토큰으로 프로젝트와 각 MR을 재검증합니다. 원본 권한이 회수되더라도 스냅샷은 자동 삭제되지 않으며, 검증 이후 원본이 바뀌는 시점까지 보호할 수 없습니다. GitLab 수집은 최대 10개 데이터 페이지와 빈 확인 페이지를 조회하고 2 MiB를 넘는 스냅샷을 거절합니다. 수집 중 원본이 바뀌면 누락될 수 있습니다. 자세한 로컬 사용법은 [README](../README.md)를 확인하세요.
+
+## 비공개 자료와 COA의 보안 경계
+
+다음은 설계 조건이며 현재 구현된 기능이 아닙니다. 진행 현황은 [#68](https://github.com/YoungJinJung/team-context/issues/68)을 확인하세요.
+
+1. **인증과 계정 연결:** COA가 검증한 사용자와 테넌트 식별자를 사용합니다. GitHub App 또는 GitLab OAuth 연결을 그 사용자에게 명시적으로 묶고, 수집자의 토큰과 조회자의 토큰을 혼용하지 않습니다. 고정된 신뢰 호스트만 허용합니다.
+2. **원본 권한:** 반환할 각 원문과 버전에 대해 요청자의 접근 권한을 원본에서 확인합니다. 권한 회수·삭제·오류·검증 불가 시 차단하고, 로그·목록·건수에도 비공개 정보가 새지 않게 합니다.
+3. **검색과 파생 데이터:** COA 네임스페이스·Cedar 권한과 원본 ACL은 서로 다른 경계입니다. 원문뿐 아니라 RAG 청크, 그래프 관계, 자연어 답변에 영향을 준 모든 출처의 권한을 검증할 수 없으면 비공개 결과를 반환하지 않습니다. 권한 확인 전에 생성된 답변을 후처리로 필터링하는 것만으로는 충분하지 않습니다.
+4. **우회 방지와 정리:** 직접 COA MCP·API·데이터 저장소 경로가 위 검증을 우회하지 못하도록 배포와 IAM을 설계합니다. 변경·삭제·권한 회수 시 원문, 인덱스와 파생 그래프를 동기화하고, 동기화 지연 중에도 안전하게 차단합니다.
+5. **검증:** 두 테넌트와 여러 사용자, 권한 회수·원본 변경·서비스 장애·동시 요청을 포함한 테스트를 실제 COA의 고정 릴리스와 공급자 샌드박스에서 수행합니다. LocalStack과 모의 테스트만으로 운영 보안을 보장하지 않습니다.
 
 ## 비용 최적화와 산정
 
