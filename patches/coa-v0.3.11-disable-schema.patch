@@ -58,6 +58,15 @@
  import { SCLStack } from "../../constructs";
  
  export interface McpStackProps extends cdk.StackProps {
+@@ -37,7 +36,7 @@
+ /**
+  * MCP Server: thin protocol adapter on AgentCore Runtime.
+  *
+- * - Discovery tools (list_metrics, describe_schema) invoke backend Lambdas directly
++ * - The list_metrics discovery tool invokes its backend Lambda directly
+  * - Execution tools (query, translate, rag, graph) forward to Context Manager
+  *   through an AgentCore Gateway target (HTTP POST with JWT forwarding)
+  */
 @@ -94,11 +93,8 @@
        this,
        METRIC_API_FUNCTION_NAME,
@@ -71,15 +80,23 @@
      // ── Security Group (minimal: HTTPS only) ──────────────────────────
      const mcpSg = new ec2.SecurityGroup(this, "McpSG", {
        vpc: props.vpc,
-@@ -193,7 +189,6 @@
+@@ -191,9 +187,8 @@
+         CM_GATEWAY_ARN: gatewayArn,
+         CM_GATEWAY_TARGET: gatewayTarget,
          CM_GATEWAY_ACCOUNT: account,
-         // Discovery tools invoke backend Lambdas directly
+-        // Discovery tools invoke backend Lambdas directly
++        // Metric discovery invokes its backend Lambda directly
          METRIC_SERVICE_LAMBDA_ARN: metricServiceLambdaArn,
 -        ONTOLOGY_PROXY_LAMBDA_ARN: ontologyProxyLambdaArn,
          // Override entrypoint to run MCP server instead of Context Manager
          SCL_MCP_MODE: "true",
          // The default, stated so the template shows it. "false" is a local-dev
-@@ -245,7 +240,7 @@
+@@ -241,11 +236,11 @@
+       }),
+     );
+ 
+-    // Invoke backend Lambdas directly (discovery tools)
++    // Invoke the metric backend directly
      runtime.addToRolePolicy(
        new iam.PolicyStatement({
          actions: ["lambda:InvokeFunction"],
