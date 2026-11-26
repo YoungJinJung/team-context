@@ -117,6 +117,12 @@ jobs:
         run: pnpm exec vitest run tests/unit/utils/build-query-endpoint.test.ts tests/unit/utils/gateway-requests.test.tsx
       - name: Test web gateway routing mutations
         run: python3 tests/coa_web_gateway_mutations.py coa-upstream
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Generate pinned COA Smithy models
+        run: bash tests/prepare_coa_models.sh coa-upstream
       - name: Apply COA schema lockdown patch
         run: git -C coa-upstream apply "$GITHUB_WORKSPACE/patches/coa-v0.3.11-disable-schema.patch"
       - name: Test disabled COA schema paths
@@ -134,3 +140,17 @@ jobs:
         run: pnpm --filter coa-infra exec jest test/services/data-layer-stack.test.ts test/services/mcp-stack.test.ts --runInBand --coverage=false
       - name: Test schema lockdown mutations
         run: python3 tests/coa_schema_lockdown_mutations.py coa-upstream
+      - name: Apply COA metric lockdown patch
+        run: git -C coa-upstream apply "$GITHUB_WORKSPACE/patches/coa-v0.3.11-disable-metrics.patch"
+      - name: Test disabled COA metric paths and existing validators
+        env:
+          PYTHONPATH: ${{ github.workspace }}/coa-upstream/packages/metric-service/src:${{ github.workspace }}/coa-upstream/packages/mcp-server/src:${{ github.workspace }}/coa-upstream/packages/context-manager/src:${{ github.workspace }}/coa-upstream/smithy-generated/control-plane-python-server
+        run: |
+          uv run --no-sync --with 'mcp>=1.30,<2' --with 'pytest-asyncio>=0.23,<2' --with 'httpx>=0.27,<1' --with 'httpx-sse>=0.4,<1' --with 'moto>=5,<6' --with 'opensearch-py>=2.8,<4' --with 'requests-aws4auth>=1.3,<2' --with 'sqlglot>=25,<30' --with 'pyyaml>=6,<7' --with 'rdflib>=7,<8' pytest -q \
+            coa-upstream/packages/metric-service/tests/unit \
+            coa-upstream/packages/mcp-server/tests/unit/test_server.py
+      - name: Test metric lockdown stack synthesis
+        working-directory: coa-upstream
+        run: pnpm --filter coa-infra exec jest test/services/mcp-stack.test.ts --runInBand --coverage=false
+      - name: Test metric lockdown mutations
+        run: python3 tests/coa_metric_lockdown_mutations.py coa-upstream
