@@ -1,0 +1,182 @@
+--- a/infra/lib/stacks/services/ontology-stack.ts
++++ b/infra/lib/stacks/services/ontology-stack.ts
+@@ -20,18 +20,16 @@
+ 
+ import { SCLStack } from "../../constructs/scl-stack";
+ import { SclMonitoring } from "../../constructs";
+-import { fromRoot, Paths } from "../../paths";
++import { Paths } from "../../paths";
+ import {
+   resolveContext,
+   guardrailProfileResources,
+   resolvePreferIpv4BuildArgs,
+ } from "../../context";
+-import { bundlePython } from "../../utils/python-bundling";
+ import {
+   GRAPH_SOURCES_ENV,
+   graphSourcesEnabled,
+ } from "../../utils/graph-sources";
+-import { grantIdempotencyTable } from "../../utils/idempotency";
+ import { grantGuardDutyAgentPull } from "../../utils/guardduty-agent";
+ import { NetworkStack } from "../foundation/network-stack";
+ import {
+@@ -1072,67 +1070,16 @@
+       stringValue: this.table.tableName,
+     });
+ 
+-    // API Proxy Lambda (forwards API Gateway → ECS via Cloud Map DNS)
++    // Source permissions are not yet enforced on ontology API requests.
+     const apiProxyFn = new lambda.Function(this, "ApiProxyFn", {
+       functionName: this.prefixed(ONTOLOGY_API_PROXY_FUNCTION_NAME),
+       runtime: lambda.Runtime.PYTHON_3_12,
+-      handler: "coa_ontology.api_proxy_handler.handler",
+-      // Merges libs/common/src into the asset root so
+-      // `coa_common` (used for resolve_region) is importable.
+-      // Its runtime deps (structlog, pydantic-settings, etc. — see
+-      // libs/common/pyproject.toml) are listed in the requirements file next
+-      // to the handler's lock, since the Lambda has no package of its own.
+-      code: bundlePython({
+-        srcDirs: [Paths.ontologyEngineSrc, Paths.commonLib],
+-        requirementsFile: fromRoot(
+-          "packages/ontology-engine/lambda/api-proxy/requirements.lock.txt",
+-        ),
+-      }),
+-      timeout: cdk.Duration.seconds(60),
+-      memorySize: 256,
+-      vpc,
+-      vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+-      securityGroups: [props.network.lambdaSecurityGroup],
+-      environment: {
+-        // Use the FQDN under the Cloud Map private DNS namespace. The short
+-        // name ``ontology-engine`` only resolves from inside ECS tasks
+-        // (which inject the namespace as a search domain); Lambda's
+-        // resolver requires the fully-qualified name.
+-        ONTOLOGY_ENGINE_ENDPOINT: `http://ontology-engine.${namespace.namespaceName}:${this.containerPort}`,
+-        SOURCES_TABLE: sourcesTableName,
+-        NEPTUNE_ENDPOINT: props.neptuneClusterEndpoint,
+-        OPENSEARCH_ENDPOINT: opensearchEndpoint,
+-        ALLOWED_ORIGIN: props.allowedOrigin,
+-      },
++      handler: "index.handler",
++      code: lambda.Code.fromInline(
++        'def handler(event, context):\n    return {"statusCode": 403, "headers": {"Content-Type": "application/json"}, "body": "{\\"message\\":\\"Ontology API is disabled\\"}"}',
++      ),
++      timeout: cdk.Duration.seconds(5),
+     });
+-    // StartInduction is retry-safe with a clientToken; the proxy (not the ECS
+-    // service) enforces it because only it sees the caller identity.
+-    grantIdempotencyTable(this, apiProxyFn);
+-    // System-health check describes only the sources table (SOURCES_TABLE).
+-    apiProxyFn.addToRolePolicy(
+-      new iam.PolicyStatement({
+-        sid: "HealthCheckDescribeSourcesTable",
+-        actions: ["dynamodb:DescribeTable"],
+-        resources: [srcTable.tableArn],
+-      }),
+-    );
+-    apiProxyFn.addToRolePolicy(
+-      new iam.PolicyStatement({
+-        actions: ["neptune-db:ReadDataViaQuery", "neptune-db:GetQueryStatus"],
+-        resources: [props.neptuneClusterArn],
+-      }),
+-    );
+-    // aoss:BatchGetCollection does not support resource-level permissions
+-    // (AWS limitation — no resource type in the Service Authorization
+-    // Reference), so it must use "*". It is a read-only control-plane call
+-    // returning collection metadata (status, endpoints), never index data.
+-    apiProxyFn.addToRolePolicy(
+-      new iam.PolicyStatement({
+-        sid: "HealthCheckBatchGetCollection",
+-        actions: ["aoss:BatchGetCollection"],
+-        resources: ["*"],
+-      }),
+-    );
+ 
+     new ssm.StringParameter(this, "SsmOntologyApiFnArn", {
+       parameterName: `${ssmPrefix}/ontology-engine/api-fn-arn`,
+--- a/infra/test/services/ontology-stack.test.ts
++++ b/infra/test/services/ontology-stack.test.ts
+@@ -3,9 +3,9 @@
+ 
+ import * as fs from "fs";
+ import * as path from "path";
++import { execFileSync } from "child_process";
+ import * as cdk from "aws-cdk-lib";
+ import { Template, Match } from "aws-cdk-lib/assertions";
+-import { expectIdempotencyWiring } from "../utils/idempotency-assertions";
+ import { OntologyStack } from "../../lib/stacks/services/ontology-stack";
+ import { NetworkStack } from "../../lib/stacks/foundation/network-stack";
+ import { DEFAULT_RESOURCE_PREFIX, DEFAULT_ENV } from "../../lib/constants";
+@@ -308,10 +308,6 @@
+     expectAossGrantsCoveredByDataPolicies(template);
+   });
+ 
+-  it("wires only the create-operation Lambda(s) to the idempotency table", () => {
+-    expectIdempotencyWiring(template, ["-ontology-api-proxy"]);
+-  });
+-
+   test("creates DynamoDB table with PK/SK", () => {
+     template.hasResourceProperties("AWS::DynamoDB::Table", {
+       TableName: `${PREFIX}-ontology-engine`,
+@@ -416,19 +412,6 @@
+         ]),
+       }),
+     });
+-  });
+-
+-  test("api proxy DescribeTable is scoped to the sources table, not *", () => {
+-    const statements = Object.values(
+-      template.findResources("AWS::IAM::Policy"),
+-    ).flatMap((p) => p.Properties.PolicyDocument.Statement);
+-    const describe = statements.filter(
+-      (s) => s.Action === "dynamodb:DescribeTable",
+-    );
+-    expect(describe).toHaveLength(1);
+-    expect(describe[0].Sid).toBe("HealthCheckDescribeSourcesTable");
+-    expect(describe[0].Resource).not.toBe("*");
+-    expect(JSON.stringify(describe[0].Resource)).toContain(":table/");
+   });
+ 
+   test("task role has Bedrock access", () => {
+@@ -769,3 +752,41 @@
+     );
+   });
+ });
++
++describe("ontology proxy lockdown", () => {
++  const template = renderOntology({}, "OntologyLockdown");
++  const resources = template.toJSON().Resources;
++  const proxy = Object.values(resources).find((r: any) =>
++    r.Type === "AWS::Lambda::Function" && String(r.Properties.FunctionName).endsWith("-ontology-api-proxy"),
++  ) as any;
++
++  it("denies direct requests for every method and path", () => {
++    expect(proxy).toBeDefined();
++    expect(proxy.Properties.Handler).toBe("index.handler");
++    const code = proxy.Properties.Code.ZipFile;
++    expect(typeof code).toBe("string");
++    const probe = `${code}\nimport json\nevents = [None, "malformed", [], {}, {"httpMethod": "GET", "resource": "/namespaces/{namespaceId}/graph/search"}, {"httpMethod": "POST", "resource": "/namespaces/{namespaceId}/embeddings/search"}, {"httpMethod": "GET", "resource": "/namespaces/{namespaceId}/ontologies/{ontologyId}/download"}, {"httpMethod": "DELETE", "resource": "/namespaces/{namespaceId}/ontologies"}]\nprint(json.dumps([handler(e, None) for e in events]))`;
++    const output = JSON.parse(execFileSync("python3", ["-c", probe], { encoding: "utf8" }));
++    expect(output).toHaveLength(8);
++    for (const result of output) {
++      expect(result.statusCode).toBe(403);
++      expect(JSON.parse(result.body)).toEqual({ message: "Ontology API is disabled" });
++    }
++  });
++
++  it("has no VPC access, application secrets or extra role policies", () => {
++    expect(proxy.Properties.VpcConfig).toBeUndefined();
++    expect(proxy.Properties.Environment).toBeUndefined();
++    const roleId = proxy.Properties.Role["Fn::GetAtt"][0];
++    const role = resources[roleId];
++    expect(role.Type).toBe("AWS::IAM::Role");
++    expect(role.Properties.Policies).toBeUndefined();
++    expect(JSON.stringify(role.Properties.ManagedPolicyArns)).toContain("AWSLambdaBasicExecutionRole");
++    expect(role.Properties.ManagedPolicyArns).toHaveLength(1);
++    for (const resource of Object.values(resources) as any[]) {
++      if (resource.Type === "AWS::IAM::Policy") {
++        expect(JSON.stringify(resource.Properties.Roles)).not.toContain(`"${roleId}"`);
++      }
++    }
++  });
++});
