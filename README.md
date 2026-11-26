@@ -16,7 +16,7 @@ The diagram is a **proposed AWS architecture**, not the current deployment. See 
 | GitLab.com | Collect and search public merge requests. Use OAuth to collect private merge requests and recheck the requester's access and the original content when searching. | Collect source files; automatically synchronize deletions and permission changes. |
 | Linear | Connect with OAuth and preview teams and issues. | Store or synchronize issues. |
 | Microsoft Teams | Connect with Microsoft Entra OAuth and preview the first page of teams and channels. | Collect chat or channel messages. |
-| Jira and Confluence | Planned. | Connector and collection. |
+| Jira and Confluence | Connect with Atlassian OAuth and preview accessible sites and granted product scopes. | Collect or synchronize tickets and documents. |
 | GitHub Enterprise and self-hosted GitLab | Planned. | Trusted host configuration and connector support. |
 
 Public search rechecks each matching original anonymously before returning it. Private GitLab search checks the project and each matching merge request with the current user's token. These checks can add latency and API calls; they cannot prevent a source from changing immediately after verification. Stored private snapshots are not automatically deleted when access is revoked. This local approach is not a production authorization boundary.
@@ -50,8 +50,9 @@ The prototype does not ask users to paste personal access tokens. OAuth sessions
 | GitHub.com | Install a GitHub App with read access to pull requests and callback `http://127.0.0.1:8765/oauth/github/callback`. Set `GITHUB_CLIENT_ID` and `GITHUB_APP_SECRET_ID`. | Private PR preview. The app client secret is stored server-side; it is not a personal access token. |
 | Linear | Register an OAuth app with callback `http://127.0.0.1:8765/oauth/linear/callback`. Set `LINEAR_CLIENT_ID`. | Team and issue preview. |
 | Microsoft Teams | Register an Entra public client with delegated `Team.ReadBasic.All`, `Channel.ReadBasic.All`, and `offline_access`. Set `TEAMS_CLIENT_ID` and register `http://127.0.0.1:8765/oauth/teams/callback` in the app manifest. | Team and channel preview; organization policies may require administrator consent. |
+| Jira and Confluence | Register an Atlassian OAuth 2.0 (3LO) app with `read:jira-work`, `read:confluence-content.summary`, and `offline_access`. Set `ATLASSIAN_CLIENT_ID` and the Secrets Manager reference `ATLASSIAN_APP_SECRET_ID` for an app client secret, and use callback `http://127.0.0.1:8765/oauth/atlassian/callback`. | Site and granted scope preview only; site access does not guarantee access to individual documents or tickets. |
 
-For GitHub, `GITHUB_APP_SECRET_ID` is the local Secrets Manager reference ID for JSON shaped as `{"client_secret":"..."}`. To create a **fake value for local tests only**:
+For GitHub and Atlassian, `GITHUB_APP_SECRET_ID` and `ATLASSIAN_APP_SECRET_ID` respectively are local Secrets Manager reference IDs for JSON shaped as `{"client_secret":"..."}`. To create a **fake value for local tests only**:
 
 ```sh
 uv run --no-sync python -c 'from auth.vault import create; print(create({"client_secret":"fake-local-secret"}))'
@@ -96,6 +97,6 @@ CI requires a backend mutation score of at least 90%, calculated as killed mutan
 
 ## Roadmap and contributions
 
-The next steps include private GitHub collection, self-hosted source support, Jira and Confluence connectors, Teams message collection, source permission and deletion synchronization, a pluggable authorization contract, AWS deployment, and COA integration. Browse the [open issues](https://github.com/YoungJinJung/team-context/issues) for current work and limitations.
+The next steps include private GitHub collection, self-hosted source support, Jira and Confluence content collection, Teams message collection, source permission and deletion synchronization, a pluggable authorization contract, AWS deployment, and COA integration. Browse the [open issues](https://github.com/YoungJinJung/team-context/issues) for current work and limitations.
 
 The current public connector contract and development workflow are documented in the [connector guide](docs/connectors.md). Contributions should include tests for new behavior and describe what was validated. The project is licensed under the [MIT License](LICENSE); AWS service icons are attributed separately in [docs/assets](docs/assets/README.md).

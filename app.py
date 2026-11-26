@@ -13,6 +13,7 @@ import connectors
 from storage import persist, search, remove_public_source, cleanup_unavailable, list_public_sources
 from auth.sessions import Sessions
 from auth.providers import PROVIDERS
+from auth import atlassian_preview
 from auth import linear_preview, teams, teams_preview, gitlab, gitlab_preview, gitlab_private, github, github_preview
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -134,6 +135,16 @@ class Handler(BaseHTTPRequestHandler):
                 return self.oauth_callback(provider, parsed.query)
             if parsed.path == f"/api/{provider.id}/status" and (provider.id != "linear" or self.path == parsed.path):
                 return self.oauth_status(provider)
+        if parsed.path == "/api/atlassian/sites":
+            if self.headers.get("Host") != "127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid host"})
+            try:
+                items = ATLASSIAN_SESSIONS.use(self.cookie("team_context_atlassian_session"), atlassian_preview.sites)
+                return self.send(200, {"items": items})
+            except ValueError:
+                return self.send(400, {"error": "Atlassian preview unavailable"})
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+                return self.send(502, {"error": "Unable to load Atlassian data"})
         if parsed.path == "/api/gitlab/private/search":
             if self.headers.get("Host") != "127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid host"})

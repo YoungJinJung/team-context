@@ -714,3 +714,76 @@ def test_namespaced_status_allows_query_but_linear_preserves_exact_path(client):
         assert response.status == 200 and json.loads(data) == {'connected': True}
     response, _ = request(client, 'GET', '/api/linear/status?unused=1')
     assert response.status == 404
+
+
+def test_atlassian_site_preview_is_session_bound_and_not_persisted(client):
+    from unittest.mock import Mock
+    sessions = Mock()
+    sessions.use.return_value = [{'id':'site', 'name':'Team', 'jira':True, 'confluence':False}]
+    with patch('app.ATLASSIAN_SESSIONS', sessions), patch('app.persist') as persist:
+        response, data = request(client, 'GET', '/api/atlassian/sites', headers={'Host':'127.0.0.1:8765', 'Cookie':'team_context_atlassian_session=own'})
+        assert response.status == 200 and json.loads(data)['items'][0]['name'] == 'Team'
+        sessions.use.assert_called_once_with('own', app.atlassian_preview.sites)
+        persist.assert_not_called()
+        response, _ = request(client, 'GET', '/api/atlassian/sites', headers={'Host':'evil.example'})
+        assert response.status == 403
+        sessions.use.side_effect = ValueError('private')
+        response, data = request(client, 'GET', '/api/atlassian/sites', headers={'Host':'127.0.0.1:8765'})
+        assert response.status == 400 and b'private' not in data
+        sessions.use.side_effect = OSError('private')
+        response, data = request(client, 'GET', '/api/atlassian/sites', headers={'Host':'127.0.0.1:8765'})
+        assert response.status == 502 and b'private' not in data
+
+
+def test_atlassian_start_callback_status_disconnect_with_fake_credentials(client):
+    from urllib.parse import parse_qs, urlsplit
+    from auth.sessions import Sessions
+    from auth import atlassian
+    sessions = Sessions(atlassian.Authorization, atlassian.refresh, 'atlassian')
+    headers = {'Host':'127.0.0.1:8765', 'Origin':'http://127.0.0.1:8765'}
+    with patch('app.ATLASSIAN_SESSIONS', sessions), patch.dict('os.environ', {'ATLASSIAN_CLIENT_ID':'client','ATLASSIAN_APP_SECRET_ID':'fake'}), patch('auth.sessions.session_store.get', side_effect=[None, 'reference', 'reference']), patch('auth.sessions.session_store.put') as put, patch('auth.sessions.session_store.remove') as remove, patch('auth.sessions.vault.create', return_value='reference'), patch('auth.sessions.vault.delete'), patch('auth.atlassian._token', return_value={'access_token':'fake-access','refresh_token':'fake-refresh'}):
+        response, body = request(client, 'POST', '/api/atlassian/start', headers=headers)
+        assert response.status == 200
+        cookie = response.getheader('Set-Cookie').split(';',1)[0]
+        state = parse_qs(urlsplit(json.loads(body)['url']).query)['state'][0]
+        response, _ = request(client, 'GET', '/oauth/atlassian/callback?code=fake&state=' + state, headers={**headers,'Cookie':cookie})
+        assert response.status == 303
+        assert put.call_args.kwargs == {'namespace':'atlassian'}
+        response, body = request(client, 'GET', '/api/atlassian/status', headers={**headers,'Cookie':cookie})
+        assert response.status == 200 and json.loads(body) == {'connected':True}
+        response, body = request(client, 'POST', '/api/atlassian/disconnect', headers={**headers,'Cookie':cookie})
+        assert response.status == 200 and json.loads(body) == {'connected':False}
+        assert remove.call_args.kwargs == {'namespace':'atlassian'}
+
+
+def test_atlassian_oauth_config_and_denial_fail_closed(client):
+    headers = {'Host':'127.0.0.1:8765', 'Origin':'http://127.0.0.1:8765'}
+    for config in ({}, {'ATLASSIAN_CLIENT_ID':'client'}, {'ATLASSIAN_APP_SECRET_ID':'secret'}):
+        with patch.dict('os.environ', config, clear=True), patch('app.ATLASSIAN_SESSIONS') as sessions:
+            sessions.connected.return_value = False
+            response, data = request(client, 'POST', '/api/atlassian/start', headers=headers)
+            assert response.status == 503 and json.loads(data) == {'error':'Set ATLASSIAN_CLIENT_ID and ATLASSIAN_APP_SECRET_ID.'}
+            sessions.start.assert_not_called()
+    with patch('app.ATLASSIAN_SESSIONS.connected', side_effect=OSError('secret')):
+        response, data = request(client, 'GET', '/api/atlassian/status', headers=headers)
+        assert response.status == 502 and json.loads(data) == {'error':'Unable to load Atlassian data'}
+        assert b'secret' not in data
+    for query in ('?error=access_denied&state=s','?code=x&state=s&state=t','?code=x&code=y&state=s'):
+        with patch('app.ATLASSIAN_SESSIONS.complete') as complete:
+            response, _ = request(client, 'GET', '/oauth/atlassian/callback' + query, headers=headers)
+            assert response.status == 400
+            complete.assert_not_called()
+
+
+@pytest.mark.parametrize('provider,session_name,cookie_name', [
+    ('atlassian','ATLASSIAN_SESSIONS','team_context_atlassian_session'),
+    ('github','GITHUB_SESSIONS','team_context_github_session'),
+    ('gitlab','GITLAB_SESSIONS','team_context_gitlab_session'),
+    ('teams','TEAMS_SESSIONS','team_context_teams_session'),
+    ('linear','SESSIONS','team_context_session'),
+])
+def test_status_uses_own_provider_cookie(client, provider, session_name, cookie_name):
+    with patch('app.' + session_name + '.connected', side_effect=lambda value: value == 'own') as connected:
+        response, data = request(client, 'GET', f'/api/{provider}/status', headers={'Host':'127.0.0.1:8765', 'Cookie':cookie_name + '=own'})
+        assert response.status == 200 and json.loads(data) == {'connected':True}
+        connected.assert_called_once_with('own')

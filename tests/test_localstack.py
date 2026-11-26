@@ -386,3 +386,18 @@ def test_local_operator_removes_only_selected_private_snapshot():
         private_snapshots.remove(first)
     finally:
         for key in (first_key,second_key,public_key): s3.delete_object(Bucket='team-context-records',Key=key)
+
+
+def test_atlassian_session_is_isolated_in_local_emulator():
+    from auth import session_store
+    from uuid import uuid4
+    import secrets
+    session = secrets.token_urlsafe(32)
+    reference = 'fake-' + uuid4().hex
+    try:
+        session_store.put(session, reference, namespace='atlassian')
+        assert session_store.get(session, namespace='atlassian') == reference
+        assert session_store.get(session, namespace='github') is None
+        assert session_store.get(session) is None
+    finally:
+        session_store.remove(session, namespace='atlassian')
