@@ -1,0 +1,1113 @@
+--- a/infra/lib/stacks/services/mcp-stack.ts
++++ b/infra/lib/stacks/services/mcp-stack.ts
+@@ -10,7 +10,6 @@
+ import { DockerImageAsset, Platform } from "aws-cdk-lib/aws-ecr-assets";
+ import { Construct } from "constructs";
+ import {
+-  prefixedLambdaArn,
+   resolveContext,
+   resolvePreferIpv4BuildArgs,
+ } from "../../context";
+@@ -19,7 +18,6 @@
+ import { brandEnv } from "../../utils/brand-env";
+ import { parseEcrImageUri } from "../../utils/ecr-utils";
+ import { Paths } from "../../paths";
+-import { METRIC_API_FUNCTION_NAME } from "./metric-service-stack";
+ import { SCLStack } from "../../constructs";
+ 
+ export interface McpStackProps extends cdk.StackProps {
+@@ -36,7 +34,7 @@
+ /**
+  * MCP Server: thin protocol adapter on AgentCore Runtime.
+  *
+- * - The list_metrics discovery tool invokes its backend Lambda directly
++ * - Schema and metric discovery are disabled until source authorization exists
+  * - Execution tools (query, translate, rag, graph) forward to Context Manager
+  *   through an AgentCore Gateway target (HTTP POST with JWT forwarding)
+  */
+@@ -84,17 +82,6 @@
+       `${ssmPrefix}/authentication-group-token-name`,
+     );
+ 
+-    // ── Backend Lambda ARNs (discovery tools) ─────────────────────────
+-    // Built from the functions' fixed names so this stack needs no dependency on
+-    // the metric-service and ontology stacks. Keep it that way: serve and mcp
+-    // share one image asset, and CDK makes that publish wait for all of mcp's
+-    // dependencies, so an edge here would delay ServeStack too.
+-    const metricServiceLambdaArn = prefixedLambdaArn(
+-      this,
+-      METRIC_API_FUNCTION_NAME,
+-    );
+-
+-
+     // ── Security Group (minimal: HTTPS only) ──────────────────────────
+     const mcpSg = new ec2.SecurityGroup(this, "McpSG", {
+       vpc: props.vpc,
+@@ -187,8 +174,6 @@
+         CM_GATEWAY_ARN: gatewayArn,
+         CM_GATEWAY_TARGET: gatewayTarget,
+         CM_GATEWAY_ACCOUNT: account,
+-        // Metric discovery invokes its backend Lambda directly
+-        METRIC_SERVICE_LAMBDA_ARN: metricServiceLambdaArn,
+         // Override entrypoint to run MCP server instead of Context Manager
+         SCL_MCP_MODE: "true",
+         // The default, stated so the template shows it. "false" is a local-dev
+@@ -236,14 +221,6 @@
+       }),
+     );
+ 
+-    // Invoke the metric backend directly
+-    runtime.addToRolePolicy(
+-      new iam.PolicyStatement({
+-        actions: ["lambda:InvokeFunction"],
+-        resources: [metricServiceLambdaArn],
+-      }),
+-    );
+-
+     // DynamoDB read (grant resolver needs roles + resource-role-mappings)
+     runtime.addToRolePolicy(
+       new iam.PolicyStatement({
+--- a/infra/test/services/mcp-stack.test.ts
++++ b/infra/test/services/mcp-stack.test.ts
+@@ -339,38 +339,19 @@
+     ).toBe(true);
+   });
+ 
+-  it("targets the discovery Lambdas by fixed name, without deploy-time SSM reads", () => {
+-    // Reading these ARNs from SSM at deploy time made McpStack (and, through the
+-    // shared image asset, ServeStack) wait for the metric-service and ontology
+-    // stacks.
+-    const runtime = JSON.stringify(
+-      template.findResources("AWS::BedrockAgentCore::Runtime"),
+-    );
+-    for (const fn of ["metric-api"]) {
+-      expect(runtime).toContain(
+-        `:lambda:us-east-1:123456789012:function:${DEFAULT_RESOURCE_PREFIX}-${DEFAULT_ENV}-${fn}`,
+-      );
+-    }
++  it("does not grant direct discovery Lambda access", () => {
++    const runtime = JSON.stringify(template.findResources("AWS::BedrockAgentCore::Runtime"));
+     expect(runtime).not.toContain("ONTOLOGY_PROXY_LAMBDA_ARN");
++    expect(runtime).not.toContain("METRIC_SERVICE_LAMBDA_ARN");
+     const policies = template.findResources("AWS::IAM::Policy");
+     const actions = Object.values(policies)
+       .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+       .flatMap((s: any) => Array.isArray(s.Action) ? s.Action : [s.Action]);
+     expect(actions).not.toContain("*");
+     expect(actions).not.toContain("lambda:*");
+-    const invokes = Object.values(policies)
+-      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+-      .filter((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]).includes("lambda:InvokeFunction"));
+-    expect(invokes).toHaveLength(1);
+-    expect(JSON.stringify(invokes)).toContain("metric-api");
+-    expect(JSON.stringify(invokes)).not.toContain("ontology-api-proxy");
+-    expect(invokes[0].Resource).not.toContain("*");
+-    // The partition comes from the stack, so GovCloud/China ARNs stay valid.
+-    expect(runtime).toContain("AWS::Partition");
+-    const params = JSON.stringify(template.toJSON().Parameters ?? {});
+-    expect(params).not.toContain("/metric/api-fn-arn");
+-    expect(params).not.toContain("/ontology-engine/api-fn-arn");
++    expect(actions).not.toContain("lambda:InvokeFunction");
+   });
++
+ });
+ 
+ describe("McpStack - teardown", () => {
+--- a/packages/mcp-server/src/coa_mcp/server.py
++++ b/packages/mcp-server/src/coa_mcp/server.py
+@@ -3,7 +3,7 @@
+ 
+ """MCP Server for Context Ontology Accelerator.
+ 
+-Exposes 6 MCP tools (2 discovery + 4 execution) via Streamable HTTP
++Exposes 4 execution tools via Streamable HTTP; discovery tools are disabled
+ on AgentCore Runtime (port 8000, --protocol MCP).
+ """
+ 
+@@ -255,69 +255,8 @@
+     maxResults: int = 100,
+     nextToken: str | None = None,
+ ) -> str:
+-    """List governed metric definitions in the namespace.
+-
+-    Returns metric summaries including name, description, dimensions, and synonyms.
+-    Use this tool FIRST to discover what metrics are available before querying.
+-    A metric's ``label`` is for display only; queries should use the metric ``name`` or its synonyms.
+-
+-    This is a read-only, lightweight lookup — no LLM calls, no SQL execution.
+-
+-    The Smithy ``ListMetrics`` operation declares a ``status`` filter, but the
+-    metric-service backend does not yet honour it. Rather than accept ``status``
+-    here and silently return an unfiltered list (which the caller would read as
+-    filtered), the parameter is intentionally not exposed until the backend can
+-    apply it.
+-
+-    Args:
+-        ctx: MCP request context carrying the caller's identity and bearer token.
+-        namespaceId: The namespace to list metrics for.
+-        maxResults: Maximum number of metrics to return (default 100, max 200).
+-        nextToken: Continuation token from a prior response. When present the
+-            call resumes where that response left off; matches the Smithy
+-            ``ListMetrics`` input shape.
+-
+-    Returns:
+-        JSON with a ``metrics`` array; ``nextToken`` when the backend
+-        paginated. Same envelope as ``GET /namespaces/{id}/metrics`` on the
+-        metric-service surface, so the two paths are drop-in interchangeable.
+-    """
+-    start = time.perf_counter()
+-    caller = None
+-    try:
+-        caller, profile = await _resolve_caller_and_profile(
+-            namespaceId, ctx, cedar_action=TOOL_CEDAR_ACTION["list_metrics"]
+-        )
+-        token = _extract_bearer_token(ctx)
+-        lc = _get_lambda_client()
+-        # Local dev: no authorizer context, so metric-service sees neither flag and
+-        # returns full definitions (its deliberate missing-flag rule).
+-        authz_ctx = None
+-        if caller.user_id != "local-dev":
+-            authz_ctx = _build_authorizer_context(caller, profile)
+-            authz_ctx.update(_metric_schema_flags(profile))
+-        result = await discovery.list_metrics(
+-            lc,
+-            namespaceId,
+-            token,
+-            max_results=maxResults,
+-            next_token=nextToken,
+-            authorizer_context=authz_ctx,
+-        )
+-        duration_ms = int((time.perf_counter() - start) * 1000)
+-        if caller:
+-            log_tool_invocation(caller, "list_metrics", namespaceId, duration_ms=duration_ms)
+-        return json.dumps(result, indent=2)
+-
+-    except (ClaimsExtractionError, GrantResolutionError) as e:
+-        if caller:
+-            log_tool_invocation(caller, "list_metrics", namespaceId, success=False, error=str(e))
+-        raise ValueError(str(e)) from e
+-    except Exception as e:
+-        logger.error("list_metrics_failed", namespace=namespaceId, error=str(e))
+-        if caller:
+-            log_tool_invocation(caller, "list_metrics", namespaceId, success=False, error=str(e))
+-        raise
++    """Deny metric discovery until source-level authorization exists."""
++    raise ValueError("Metric access is disabled")
+ 
+ 
+ @mcp.tool()
+--- a/packages/mcp-server/tests/unit/test_server.py
++++ b/packages/mcp-server/tests/unit/test_server.py
+@@ -244,139 +244,14 @@
+ 
+ @pytest.mark.unit
+ class TestListMetricsTool:
+-    @pytest.mark.asyncio
+-    async def test_returns_serialized_metrics(self, monkeypatch, _local_dev):
+-        async def fake_delegate(lc, ns, token, **kwargs):
+-            return {"metrics": [{"name": "Revenue"}], "namespace": ns}
+-
+-        monkeypatch.setattr(server.discovery, "list_metrics", fake_delegate)
+-        out = await server.list_metrics(None, "sales")
+-        parsed = json.loads(out)
+-        assert parsed["metrics"][0]["name"] == "Revenue"
+-        assert parsed["namespace"] == "sales"
+-
+-    @pytest.mark.asyncio
+-    async def test_local_dev_passes_no_authorizer_context(self, monkeypatch, _local_dev):
+-        captured: dict = {}
+-
+-        async def fake_delegate(lc, ns, token, **kwargs):
+-            captured["authorizer_context"] = kwargs.get("authorizer_context")
+-            return {"metrics": []}
+-
+-        monkeypatch.setattr(server.discovery, "list_metrics", fake_delegate)
+-        await server.list_metrics(None, "sales")
+-        assert captured["authorizer_context"] is None
+-
+     @pytest.mark.asyncio
+-    @pytest.mark.parametrize(
+-        ("visibility", "expected"),
+-        [
+-            ({}, ("false", "false")),
+-            ({"viewSource": True, "viewOntology": True}, ("true", "true")),
+-            ({"viewSource": True, "viewOntology": False}, ("true", "false")),
+-        ],
+-    )
+-    async def test_authenticated_call_forwards_schema_flags(self, monkeypatch, visibility, expected):
+-        """The metric service withholds SQL/tables/concepts unless these flags are "true";
+-        they come from the decisions resolve_grant cached on the profile (no reload)."""
+-        monkeypatch.setattr(server.config, "auth_enabled", True)
+-        monkeypatch.setattr(server, "_get_lambda_client", lambda: object())
+-        monkeypatch.setattr(server, "_extract_bearer_token", lambda ctx: "tok")
+-
+-        async def fake_resolve(namespace_id, ctx, cedar_action=None):
+-            caller = server.CallerIdentity(
+-                user_id="u@example.com", agent_id=None, namespaces=[namespace_id], roles=[], raw_claims={}
+-            )
+-            return caller, {
+-                "userId": "u@example.com",
+-                "globalRoles": [],
+-                "resourceRoles": [],
+-                "schemaVisibility": visibility,
+-            }
+-
+-        captured: dict = {}
+-
+-        async def fake_delegate(lc, ns, token, **kwargs):
+-            captured["ctx"] = kwargs.get("authorizer_context")
+-            return {"metrics": []}
+-
+-        monkeypatch.setattr(server, "_resolve_caller_and_profile", fake_resolve)
+-        monkeypatch.setattr(server.discovery, "list_metrics", fake_delegate)
+-        await server.list_metrics(None, "sales")
+-        assert (captured["ctx"]["canViewSource"], captured["ctx"]["canViewOntology"]) == expected
+-
+-    @pytest.mark.asyncio
+-    async def test_auth_error_maps_to_value_error(self, monkeypatch):
+-        monkeypatch.setattr(server.config, "auth_enabled", True)
+-        with pytest.raises(ValueError, match="Missing Authorization header"):
+-            await server.list_metrics(_FakeCtx(None), "sales")
+-
+-    @pytest.mark.asyncio
+-    async def test_backend_error_reraised(self, monkeypatch, _local_dev):
+-        async def boom(lc, ns, token, **kwargs):
+-            raise RuntimeError("lambda exploded")
+-
+-        monkeypatch.setattr(server.discovery, "list_metrics", boom)
+-        with pytest.raises(RuntimeError, match="lambda exploded"):
+-            await server.list_metrics(None, "sales")
+-
+-    @pytest.mark.asyncio
+-    async def test_auth_enabled_builds_authorizer_context(self, monkeypatch):
+-        monkeypatch.setattr(server.config, "auth_enabled", True)
+-        monkeypatch.setattr("coa_mcp.auth.grant_resolver._ROLES_TABLE", "test-roles-table")
+-        monkeypatch.setattr("coa_mcp.auth.grant_resolver._evaluate_cedar", lambda *a, **k: _NO_POLICY_TEXT)
+-        monkeypatch.setattr(server, "_get_lambda_client", lambda: object())
+-        monkeypatch.setattr(
+-            "coa_serve.role_resolver.resolve_profile",
+-            lambda **kwargs: _serve_profile(),
+-        )
+-        captured: dict = {}
+-
+-        async def fake_delegate(lc, ns, token, **kwargs):
+-            captured["authorizer_context"] = kwargs.get("authorizer_context")
+-            captured["token"] = token
+-            return {"metrics": []}
+-
+-        monkeypatch.setattr(server.discovery, "list_metrics", fake_delegate)
+-        token = create_test_token(user_id="alice", namespaces=["sales"], roles=["viewer"])
+-        await server.list_metrics(_FakeCtx(f"Bearer {token}"), "sales")
+-        assert captured["authorizer_context"] is not None
+-        assert captured["authorizer_context"]["principalId"] == "alice"
+-        assert captured["token"] == token
+-
+-    @pytest.mark.asyncio
+-    async def test_forwards_next_token(self, monkeypatch, _local_dev):
+-        """``nextToken`` reaches the helper as ``next_token``; ``status`` is not exposed (backend ignores it)."""
+-        captured: dict = {}
+-
+-        async def fake_delegate(lc, ns, token, **kwargs):
+-            captured.update(kwargs)
+-            return {"metrics": [], "nextToken": None}
+-
+-        monkeypatch.setattr(server.discovery, "list_metrics", fake_delegate)
+-        await server.list_metrics(None, "sales", nextToken="cursor-abc")
+-        assert captured["next_token"] == "cursor-abc"
+-        assert "status" not in captured
+-
+-    @pytest.mark.asyncio
+-    async def test_metric_label_reaches_the_tool_output(self, monkeypatch, _local_dev):
+-        """The display-only ``label`` stays in the output so an agent can show it."""
+-
+-        async def fake_delegate(lc, ns, token, **kwargs):
+-            return {"metrics": [{"name": "revenue_total", "label": "売上合計"}, {"name": "order_count"}]}
+-
+-        monkeypatch.setattr(server.discovery, "list_metrics", fake_delegate)
+-        parsed = json.loads(await server.list_metrics(None, "sales"))
+-        assert parsed["metrics"][0]["label"] == "売上合計"
+-        assert "label" not in parsed["metrics"][1]
+-
+-    @pytest.mark.asyncio
+-    async def test_description_says_label_is_display_only(self):
+-        """Without this an agent seeing ``label: 売上合計`` would put the label in its query."""
+-        tools = await server.mcp.list_tools()
+-        description = next(t for t in tools if t.name == "list_metrics").description or ""
+-        assert "``label`` is for display only" in description
+-        assert "``name`` or its synonyms" in description
++    @pytest.mark.parametrize("namespace", ["sales", "finance"])
++    async def test_denies_metric_discovery_without_invoking_backend(self, monkeypatch, namespace):
++        delegate = AsyncMock()
++        monkeypatch.setattr(server.discovery, "list_metrics", delegate)
++        with pytest.raises(ValueError, match="Metric access is disabled"):
++            await server.list_metrics(None, namespace)
++        delegate.assert_not_awaited()
+ 
+ 
+ @pytest.mark.unit
+--- a/packages/metric-service/src/coa_metrics/api/metric_api_handler.py
++++ b/packages/metric-service/src/coa_metrics/api/metric_api_handler.py
+@@ -1,75 +1,15 @@
+ # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ # SPDX-License-Identifier: Apache-2.0
+ 
+-"""Metric API Lambda — combined handler for all metric CRUD + OSI operations.
++"""Deny metric API access until source-level authorization exists."""
+ 
+-Routes:
+-  POST   /namespaces/{ns}/metrics                  → create
+-  GET    /namespaces/{ns}/metrics                  → list
+-  GET    /namespaces/{ns}/metrics/{name}           → get
+-  PUT    /namespaces/{ns}/metrics/{name}           → update
+-  DELETE /namespaces/{ns}/metrics/{name}           → delete
+-  POST   /namespaces/{ns}/metrics/validate         → validate
+-  POST   /namespaces/{ns}/metrics/import-osi       → import OSI
+-  GET    /namespaces/{ns}/metrics/export-osi       → export OSI
+-"""
+-
+ from __future__ import annotations
+ 
+-import os
+ from typing import Any
+ 
+-import structlog
+-from coa_common.logging import setup_logging
+ from coa_common.response import api_response
+ 
+-from .bulk_delete_metrics import handler as bulk_delete_handler
+-from .create_metric import handler as create_handler
+-from .delete_metric import handler as delete_handler
+-from .export_osi import handler as export_osi_handler
+-from .get_import_job import handler as get_import_job_handler
+-from .get_metric import handler as get_handler
+-from .get_osi_upload_url import handler as get_osi_upload_url_handler
+-from .import_osi import handler as import_osi_handler
+-from .list_metrics import handler as list_handler
+-from .update_metric import handler as update_handler
+-from .validate_metric import handler as validate_handler
+ 
+-setup_logging(os.environ.get("LOG_LEVEL", "INFO"))
+-logger = structlog.get_logger(__name__)
+-
+-
+ def handler(event: dict[str, Any], context: Any) -> dict[str, Any]:
+-    """API Gateway proxy-integration Lambda handler — routes by method + path."""
+-    http_method = event.get("httpMethod", "")
+-    resource = event.get("resource", "")
+-    path_params = event.get("pathParameters") or {}
+-    has_name = bool(path_params.get("name"))
+-
+-    if resource.endswith("/import-osi/upload-url") and http_method == "POST":
+-        return get_osi_upload_url_handler(event, context)
+-    elif resource.endswith("/import-osi") and http_method == "POST":
+-        return import_osi_handler(event, context)
+-    elif resource.endswith("/export-osi") and http_method == "GET":
+-        return export_osi_handler(event, context)
+-    elif "/import-jobs/" in resource and http_method == "GET":
+-        return get_import_job_handler(event, context)
+-    elif resource.endswith("/bulk-delete-metrics") and http_method == "POST":
+-        return bulk_delete_handler(event, context)
+-
+-    # Validate route (must be before generic POST to avoid conflict)
+-    if resource.endswith("/validate") and http_method == "POST":
+-        return validate_handler(event, context)
+-
+-    if http_method == "POST":
+-        return create_handler(event, context)
+-    elif http_method == "GET" and has_name:
+-        return get_handler(event, context)
+-    elif http_method == "GET":
+-        return list_handler(event, context)
+-    elif http_method == "PUT" and has_name:
+-        return update_handler(event, context)
+-    elif http_method == "DELETE" and has_name:
+-        return delete_handler(event, context)
+-    else:
+-        return api_response(405, {"message": "Method not allowed"}, {"Allow": "GET, POST, PUT, DELETE"})
++    """Deny metric API access until source-level authorization exists."""
++    return api_response(403, {"message": "Metric access is disabled"})
+--- a/packages/metric-service/tests/unit/test_api_contract_conformance.py
++++ b/packages/metric-service/tests/unit/test_api_contract_conformance.py
+@@ -1,292 +1,29 @@
+ # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ # SPDX-License-Identifier: Apache-2.0
+-
+-"""Every metric-service operation's Smithy input members are read by the handler that serves it.
+-
+-Guards two drift classes between ``metric-service.smithy`` and the Lambda:
+-
+-* **Declared but inert** — a member the model advertises (path label, query
+-  parameter or body member) that the handler never reads is silently dropped:
+-  the caller gets a 2xx computed without it.
+-* **Read but undeclared** — a parameter the handler honours that the model does
+-  not declare is invisible to generated clients and the published OpenAPI.
+-
+-Source of truth is the generated ``ControlPlaneService.openapi.json`` (what API
+-Gateway and clients are told). Each operation declared in
+-``metric-service.smithy`` is dispatched through the real router
+-(``metric_api_handler.handler``) with every per-operation handler patched, so
+-the routing under test is the production routing. The chosen module's
+-``handler`` — plus every module-level helper it calls, transitively — is
+-AST-scanned for reads:
+-
+-* ``body.get("x")`` / ``body["x"]`` — request body;
+-* ``query_params.get("x")`` / ``multi_value_params.get("x")`` — query string;
+-* ``.get("x")`` on ``pathParameters`` — path label;
+-* ``<GeneratedModel>.model_validate(body)`` — every field of the generated
+-  model counts as read from the body, and each field must then be used as
+-  ``request.<field>`` somewhere in the scanned code;
+-* ``@idempotent(...)`` on ``handler`` — ``clientToken`` is consumed by the
+-  idempotency layer before the handler runs.
+-
+-Reading a member is necessary, not sufficient: ``test_contract_bounds.py`` checks
+-the bounds, and the handler tests check behaviour.
+-"""
+-
+-from __future__ import annotations
+-
+-import ast
+-import importlib
+-import inspect
++"""Every generated metric API operation must remain disabled in lockdown mode."""
+ import json
+ import re
+ from pathlib import Path
+-from typing import Any
+-from unittest.mock import MagicMock, patch
+ 
+ import pytest
+-from coa_metrics.api import metric_api_handler
++from coa_metrics.api.metric_api_handler import handler
+ 
+-pytestmark = pytest.mark.unit
++ROOT = Path(__file__).resolve().parents[4]
++SMITHY = ROOT / "models/src/main/smithy/metric-service.smithy"
++OPENAPI = ROOT / "smithy-generated/openapi/openapi/ControlPlaneService.openapi.json"
+ 
+-_REPO = Path(__file__).resolve().parents[4]
+-_OPENAPI = _REPO / "smithy-generated" / "openapi" / "openapi" / "ControlPlaneService.openapi.json"
+-_SMITHY = _REPO / "models" / "src" / "main" / "smithy" / "metric-service.smithy"
+ 
+-_BODY_NAMES = {"body"}
+-_QUERY_NAMES = {"query_params", "multi_value_params"}
+-_PATH_NAMES = {"path_params"}
+-_REQUEST_NAMES = {"request"}
+-
+-# (operationId, member) -> why a declared member is not read. Keep empty unless a
+-# gap is deliberate; every entry is a member the contract promises and the
+-# service does not honour.
+-_KNOWN_GAPS: dict[tuple[str, str], str] = {}
+-
+-# (operationId, field) -> why a field of the generated model is checked by the
+-# model's own schema validation only and never used afterwards.
+-_SCHEMA_ONLY_FIELDS: dict[tuple[str, str], str] = {
+-    # ValidateMetric persists nothing: these members carry no rule beyond their
+-    # type / bounds, which model_validate already enforces (out-of-contract
+-    # values get a 400). They are accepted so a create payload validates as-is.
+-    ("ValidateMetric", "aiContext"): "schema-only: no semantic check beyond the model's bounds",
+-    ("ValidateMetric", "defaultTimeGrain"): "schema-only: enum checked by the model",
+-    ("ValidateMetric", "returnType"): "schema-only: no semantic check beyond the model's bounds",
+-    ("ValidateMetric", "unit"): "schema-only: no semantic check beyond the model's bounds",
+-}
+-
+-# (operationId, "body"|"query"|"path", key) -> why the handler reads a parameter
+-# the model does not declare (legacy aliases kept for existing callers).
+-_UNDECLARED_READS: dict[tuple[str, str, str], str] = {}
+-
+-
+-def _spec() -> dict[str, Any]:
+-    if not _OPENAPI.is_file():
+-        pytest.skip(
+-            f"{_OPENAPI} not found — it is generated, not committed. Run `make generate` "
+-            "to produce it (CI generates it before the unit-test jobs)."
+-        )
+-    return json.loads(_OPENAPI.read_text())
+-
+-
+-def _metric_operations() -> list[str]:
+-    return re.findall(r"^operation\s+(\w+)", _SMITHY.read_text(), re.MULTILINE)
+-
+-
+-def _operations(spec: dict[str, Any]) -> dict[str, tuple[str, str, dict[str, Any]]]:
+-    ops: dict[str, tuple[str, str, dict[str, Any]]] = {}
+-    for path, item in spec["paths"].items():
+-        for method, op in item.items():
+-            if isinstance(op, dict) and "operationId" in op:
+-                ops[op["operationId"]] = (method.upper(), path, op)
+-    return ops
+-
+-
+-def _declared(spec: dict[str, Any], op: dict[str, Any]) -> dict[str, set[str]]:
+-    params = op.get("parameters", [])
+-    body: set[str] = set()
+-    schema = op.get("requestBody", {}).get("content", {}).get("application/json", {}).get("schema", {})
+-    if "$ref" in schema:
+-        schema = spec["components"]["schemas"][schema["$ref"].rsplit("/", 1)[-1]]
+-    body.update(schema.get("properties", {}))
+-    return {
+-        "body": body,
+-        "query": {p["name"] for p in params if p.get("in") == "query"},
+-        "path": {p["name"] for p in params if p.get("in") == "path"},
+-    }
+-
+-
+-def _routed_module(method: str, path: str) -> str:
+-    """The module whose ``handler`` the production router dispatches ``method path`` to."""
+-    targets = {
+-        name: obj
+-        for name, obj in vars(metric_api_handler).items()
+-        if name.endswith("_handler") and callable(obj) and getattr(obj, "__module__", "").startswith("coa_metrics.api")
+-    }
+-    labels = {label: "sample" for label in re.findall(r"\{(\w+)\}", path)}
+-    event = {"httpMethod": method, "resource": path, "pathParameters": labels}
+-    mocks = {name: MagicMock(return_value={"statusCode": 200}) for name in targets}
+-    with patch.multiple(metric_api_handler, **mocks):
+-        metric_api_handler.handler(event, None)
+-    called = [name for name, mock in mocks.items() if mock.called]
+-    assert len(called) == 1, f"{method} {path} dispatched to {called or 'nothing'}"
+-    return targets[called[0]].__module__
+-
+-
+-class _Reads:
+-    def __init__(self) -> None:
+-        self.keys: dict[str, set[str]] = {"body": set(), "query": set(), "path": set()}
+-        self.request_attrs: set[str] = set()
+-        self.models: list[str] = []
+-        self.idempotent = False
+-
+-
+-def _scan(module_name: str) -> _Reads:
+-    module = importlib.import_module(module_name)
+-    tree = ast.parse(inspect.getsource(module))
+-    funcs = {n.name: n for n in tree.body if isinstance(n, ast.FunctionDef)}
+-    reads = _Reads()
+-    handler_def = funcs["handler"]
+-    reads.idempotent = any(
+-        isinstance(d, ast.Call) and isinstance(d.func, ast.Name) and d.func.id == "idempotent"
+-        for d in handler_def.decorator_list
+-    )
+-    pending, visited = ["handler"], set()
+-    while pending:
+-        name = pending.pop()
+-        if name in visited or name not in funcs:
+-            continue
+-        visited.add(name)
+-        for node in ast.walk(funcs[name]):
+-            _record(node, reads)
+-            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name):
+-                pending.append(node.func.id)
+-    return reads
+-
+-
+-def _record(node: ast.AST, reads: _Reads) -> None:
+-    target: ast.AST | None = None
+-    key: object = None
+-    if (
+-        isinstance(node, ast.Call)
+-        and isinstance(node.func, ast.Attribute)
+-        and node.func.attr == "get"
+-        and node.args
+-        and isinstance(node.args[0], ast.Constant)
+-    ):
+-        target, key = node.func.value, node.args[0].value
+-    elif isinstance(node, ast.Subscript) and isinstance(node.slice, ast.Constant):
+-        target, key = node.value, node.slice.value
+-    if target is not None and isinstance(key, str):
+-        if isinstance(target, ast.Name) and target.id in _BODY_NAMES:
+-            reads.keys["body"].add(key)
+-        elif isinstance(target, ast.Name) and target.id in _QUERY_NAMES:
+-            reads.keys["query"].add(key)
+-        elif key != "pathParameters" and (
+-            (isinstance(target, ast.Name) and target.id in _PATH_NAMES) or "'pathParameters'" in ast.dump(target)
+-        ):
+-            reads.keys["path"].add(key)
+-    if (
+-        isinstance(node, ast.Call)
+-        and isinstance(node.func, ast.Attribute)
+-        and node.func.attr == "model_validate"
+-        and isinstance(node.func.value, ast.Name)
+-    ):
+-        reads.models.append(node.func.value.id)
+-    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name) and node.value.id in _REQUEST_NAMES:
+-        reads.request_attrs.add(node.attr)
+-
+-
+-def _model_fields(module_name: str, class_name: str) -> dict[str, str]:
+-    """``alias -> python attribute`` for a generated model the module validates the body with."""
+-    cls = getattr(importlib.import_module(module_name), class_name)
+-    return {(field.alias or attr): attr for attr, field in cls.model_fields.items()}
+-
+-
+-def _effective_reads(module_name: str, reads: _Reads) -> dict[str, set[str]]:
+-    keys = {kind: set(values) for kind, values in reads.keys.items()}
+-    for class_name in reads.models:
+-        keys["body"].update(_model_fields(module_name, class_name))
+-    if reads.idempotent:
+-        keys["body"].add("clientToken")
+-    return keys
+-
+-
+-def _case(operation: str) -> tuple[str, dict[str, set[str]], dict[str, set[str]], _Reads]:
+-    spec = _spec()
+-    ops = _operations(spec)
+-    assert operation in ops, f"{operation} not found in ControlPlaneService.openapi.json"
+-    method, path, op = ops[operation]
+-    module_name = _routed_module(method, path)
+-    reads = _scan(module_name)
+-    return module_name, _declared(spec, op), _effective_reads(module_name, reads), reads
+-
+-
+-@pytest.mark.parametrize("operation", _metric_operations())
+-def test_every_declared_input_member_is_read(operation: str) -> None:
+-    module_name, declared, read, _ = _case(operation)
+-    missing = sorted(
+-        f"{kind}.{member}"
+-        for kind in ("body", "query", "path")
+-        for member in declared[kind] - read[kind]
+-        if (operation, member) not in _KNOWN_GAPS
+-    )
+-    assert not missing, (
+-        f"{operation}: members declared in metric-service.smithy but never read by "
+-        f"{module_name}.handler (silently dropped): {missing}"
+-    )
+-
+-
+-@pytest.mark.parametrize("operation", _metric_operations())
+-def test_handler_reads_no_undeclared_parameter(operation: str) -> None:
+-    module_name, declared, read, _ = _case(operation)
+-    extra = sorted(
+-        f"{kind}.{key}"
+-        for kind in ("body", "query", "path")
+-        for key in read[kind] - declared[kind]
+-        if (operation, kind, key) not in _UNDECLARED_READS
+-    )
+-    assert not extra, (
+-        f"{operation}: {module_name}.handler reads parameters metric-service.smithy does not "
+-        f"declare (declare them, or allowlist a legacy alias with a reason): {extra}"
+-    )
+-
+-
+-@pytest.mark.parametrize("operation", _metric_operations())
+-def test_every_validated_model_field_is_used(operation: str) -> None:
+-    """A field the generated model parses but the handler never touches is dropped too."""
+-    module_name, _, _, reads = _case(operation)
+-    for class_name in reads.models:
+-        unused = sorted(
+-            alias
+-            for alias, attr in _model_fields(module_name, class_name).items()
+-            if attr not in reads.request_attrs
+-            and (operation, alias) not in _SCHEMA_ONLY_FIELDS
+-            # Stripped from the body by @idempotent before validation.
+-            and not (reads.idempotent and alias == "clientToken")
+-        )
+-        assert not unused, f"{operation}: {class_name} fields parsed but never read via request.<field>: {unused}"
+-
+-
+-def test_known_gaps_and_allowlist_are_still_needed() -> None:
+-    for operation, alias in _SCHEMA_ONLY_FIELDS:
+-        module_name, _, _, reads = _case(operation)
+-        attrs = {a: f for c in reads.models for a, f in _model_fields(module_name, c).items()}
+-        assert alias in attrs and attrs[alias] not in reads.request_attrs, f"drop stale entry {operation}.{alias}"
+-    for operation, member in _KNOWN_GAPS:
+-        _, _, read, _ = _case(operation)
+-        assert all(member not in keys for keys in read.values()), f"{operation}.{member} is now read — drop the gap"
+-    for operation, kind, key in _UNDECLARED_READS:
+-        _, declared, read, _ = _case(operation)
+-        assert key in read[kind] and key not in declared[kind], f"drop stale allowlist entry {operation}.{kind}.{key}"
+-
+-
+-def test_scanner_detects_reads_and_follows_helpers() -> None:
+-    """Negative control: reads in called helpers are seen; absent keys stay absent."""
+-    bulk = _scan("coa_metrics.api.bulk_delete_metrics")
+-    assert {"names", "filter", "deleteAll"} <= bulk.keys["body"]
+-    assert "phantomMember" not in bulk.keys["body"]
+-    create = _scan("coa_metrics.api.create_metric")
+-    assert create.idempotent and "CreateMetricRequestContent" in create.models
+-    # ontology_concepts is read inside the _validate_soft / _build_metric_definition helpers.
+-    assert "ontology_concepts" in create.request_attrs
+-    assert "namespaceId" in _scan("coa_metrics.api.get_metric").keys["path"]
++def test_all_generated_metric_operations_are_denied():
++    if not OPENAPI.is_file():
++        pytest.skip("Generate the COA Smithy OpenAPI specification first")
++    names = set(re.findall(r"^operation\s+(\w+)", SMITHY.read_text(), re.MULTILINE))
++    spec = json.loads(OPENAPI.read_text())
++    operations = {}
++    for path, methods in spec["paths"].items():
++        for method, operation in methods.items():
++            if isinstance(operation, dict) and operation.get("operationId") in names:
++                operations[operation["operationId"]] = (method.upper(), path)
++    assert set(operations) == names
++    for operation, (method, path) in operations.items():
++        response = handler({"httpMethod": method, "resource": path, "pathParameters": {"namespaceId": "sales", "name": "x"}}, None)
++        assert response["statusCode"] == 403, operation
+--- a/packages/metric-service/tests/unit/test_contract_bounds.py
++++ b/packages/metric-service/tests/unit/test_contract_bounds.py
+@@ -27,8 +27,36 @@
+ 
+ import pytest
+ from coa_metrics.api import contract
+-from coa_metrics.api.metric_api_handler import handler as metric_api_handler
++
++def _metric_handler_under_test(event, context):
++    from importlib import import_module
++    method = event.get("httpMethod", "")
++    resource = event.get("resource", "")
++    if resource.endswith("/import-osi/upload-url"):
++        module = "get_osi_upload_url"
++    elif resource.endswith("/import-osi"):
++        module = "import_osi"
++    elif resource.endswith("/export-osi"):
++        module = "export_osi"
++    elif "/import-jobs/" in resource:
++        module = "get_import_job"
++    elif resource.endswith("/bulk-delete-metrics"):
++        module = "bulk_delete_metrics"
++    elif method == "GET" and event.get("pathParameters", {}).get("name"):
++        module = "get_metric"
++    elif method == "GET":
++        module = "list_metrics"
++    elif method == "PUT":
++        module = "update_metric"
++    elif method == "DELETE":
++        module = "delete_metric"
++    elif resource.endswith("/validate"):
++        module = "validate_metric"
++    else:
++        module = "create_metric"
++    return import_module(f"coa_metrics.api.{module}").handler(event, context)
+ 
++
+ pytestmark = pytest.mark.unit
+ 
+ # tests/unit/<this> -> up 4 = repo root
+@@ -298,14 +326,14 @@
+ )
+ def test_over_long_metric_name_label_rejected(neptune: Any, method: str, resource: str) -> None:
+     name = _POISON + "x" * contract.METRIC_NAME_MAX_LENGTH
+-    resp = metric_api_handler(_event(method, resource, path={"name": name}, body={}), None)
++    resp = _metric_handler_under_test(_event(method, resource, path={"name": name}, body={}), None)
+     _assert_rejected(resp, "name")
+     assert not neptune.method_calls
+ 
+ 
+ def test_missing_metric_404_does_not_echo_name(neptune: Any) -> None:
+     neptune.get_metric.return_value = None
+-    resp = metric_api_handler(_event("GET", "/namespaces/{namespaceId}/metrics/{name}", path={"name": "a<b>"}), None)
++    resp = _metric_handler_under_test(_event("GET", "/namespaces/{namespaceId}/metrics/{name}", path={"name": "a<b>"}), None)
+     assert resp["statusCode"] == 404
+     assert "a<b>" not in resp["body"]
+ 
+@@ -323,7 +351,7 @@
+     ],
+ )
+ def test_list_metrics_out_of_contract_query_rejected(neptune: Any, query: dict, field: str) -> None:
+-    resp = metric_api_handler(_event("GET", "/namespaces/{namespaceId}/metrics", query=query), None)
++    resp = _metric_handler_under_test(_event("GET", "/namespaces/{namespaceId}/metrics", query=query), None)
+     _assert_rejected(resp, field)
+     neptune.list_metrics.assert_not_called()
+ 
+@@ -331,7 +359,7 @@
+ def test_list_metrics_page_size_above_cap_is_clamped(neptune: Any) -> None:
+     neptune.list_metrics.return_value = []
+     query = {"maxResults": "1000", "nextToken": "200"}
+-    resp = metric_api_handler(_event("GET", "/namespaces/{namespaceId}/metrics", query=query), None)
++    resp = _metric_handler_under_test(_event("GET", "/namespaces/{namespaceId}/metrics", query=query), None)
+     assert resp["statusCode"] == 200
+     kwargs = neptune.list_metrics.call_args.kwargs
+     assert (kwargs["limit"], kwargs["offset"]) == (contract.LIST_METRICS_MAX_RESULTS_MAX + 1, 200)
+@@ -340,7 +368,7 @@
+ def test_get_import_job_over_long_job_id_rejected() -> None:
+     job_id = _POISON + "j" * contract.JOB_ID_MAX_LENGTH
+     with patch("coa_metrics.api.get_import_job.get_job") as get_job:
+-        resp = metric_api_handler(
++        resp = _metric_handler_under_test(
+             _event("GET", "/namespaces/{namespaceId}/import-jobs/{jobId}", path={"jobId": job_id}), None
+         )
+     _assert_rejected(resp, "jobId")
+@@ -349,7 +377,7 @@
+ 
+ def test_get_import_job_404_does_not_echo_job_id() -> None:
+     with patch("coa_metrics.api.get_import_job.get_job", return_value=None):
+-        resp = metric_api_handler(
++        resp = _metric_handler_under_test(
+             _event("GET", "/namespaces/{namespaceId}/import-jobs/{jobId}", path={"jobId": "a<b>"}), None
+         )
+     assert resp["statusCode"] == 404
+@@ -360,7 +388,7 @@
+     monkeypatch.setenv("OSI_BUCKET_NAME", "bucket")
+     filename = "f" * contract.FILENAME_MAX_LENGTH + ".yaml"
+     with patch("coa_metrics.api.get_osi_upload_url._get_s3_client") as s3:
+-        resp = metric_api_handler(
++        resp = _metric_handler_under_test(
+             _event("POST", "/namespaces/{namespaceId}/import-osi/upload-url", body={"filename": filename}), None
+         )
+     _assert_rejected(resp, "filename")
+@@ -368,7 +396,7 @@
+ 
+ 
+ def test_upload_url_bad_extension_not_echoed() -> None:
+-    resp = metric_api_handler(
++    resp = _metric_handler_under_test(
+         _event("POST", "/namespaces/{namespaceId}/import-osi/upload-url", body={"filename": "x.<script>"}), None
+     )
+     assert resp["statusCode"] == 400
+@@ -384,7 +412,7 @@
+ )
+ def test_import_osi_out_of_contract_body_rejected(body: dict, field: str) -> None:
+     with patch("coa_metrics.api.import_osi._read_from_s3") as read:
+-        resp = metric_api_handler(_event("POST", "/namespaces/{namespaceId}/import-osi", body=body), None)
++        resp = _metric_handler_under_test(_event("POST", "/namespaces/{namespaceId}/import-osi", body=body), None)
+     _assert_rejected(resp, field)
+     read.assert_not_called()
+ 
+@@ -405,7 +433,7 @@
+ )
+ def test_bulk_delete_out_of_contract_body_rejected(neptune: Any, body: dict, field: str) -> None:
+     with patch("coa_metrics.api.bulk_delete_metrics._get_opensearch"):
+-        resp = metric_api_handler(_event("POST", "/namespaces/{namespaceId}/bulk-delete-metrics", body=body), None)
++        resp = _metric_handler_under_test(_event("POST", "/namespaces/{namespaceId}/bulk-delete-metrics", body=body), None)
+     _assert_rejected(resp, field)
+     assert not neptune.method_calls
+ 
+@@ -414,12 +442,12 @@
+     neptune.delete_metric.return_value = True
+     body = {"names": ["m"] * contract.BULK_DELETE_NAMES_MAX_ITEMS}
+     with patch("coa_metrics.api.bulk_delete_metrics._get_opensearch"):
+-        resp = metric_api_handler(_event("POST", "/namespaces/{namespaceId}/bulk-delete-metrics", body=body), None)
++        resp = _metric_handler_under_test(_event("POST", "/namespaces/{namespaceId}/bulk-delete-metrics", body=body), None)
+     assert resp["statusCode"] == 200
+ 
+ 
+ def test_export_osi_too_many_names_rejected(neptune: Any) -> None:
+     names = ["m"] * (contract.EXPORT_NAMES_MAX_ITEMS + 1)
+-    resp = metric_api_handler(_event("GET", "/namespaces/{namespaceId}/export-osi", multi={"names": names}), None)
++    resp = _metric_handler_under_test(_event("GET", "/namespaces/{namespaceId}/export-osi", multi={"names": names}), None)
+     _assert_rejected(resp, "names")
+     neptune.get_metrics_bulk.assert_not_called()
+--- a/packages/metric-service/tests/unit/test_idempotent_creates.py
++++ b/packages/metric-service/tests/unit/test_idempotent_creates.py
+@@ -12,7 +12,7 @@
+ import pytest
+ from coa_common.testing import mock_idempotency_table
+ from coa_metrics.api import import_osi
+-from coa_metrics.api.metric_api_handler import handler as metric_api_handler
++from coa_metrics.api.create_metric import handler as create_handler
+ from coa_metrics.source_status import PERMISSIVE_ENV
+ 
+ pytestmark = pytest.mark.unit
+@@ -65,10 +65,10 @@
+     neptune = mock_neptune.return_value
+     neptune.get_metric.return_value = None
+ 
+-    first = metric_api_handler(_event("/namespaces/{namespaceId}/metrics", _metric_body("m-1")), None)
++    first = create_handler(_event("/namespaces/{namespaceId}/metrics", _metric_body("m-1")), None)
+     # The non-atomic existence check would now see the metric and 409 a plain retry.
+     neptune.get_metric.return_value = {"name": "monthly_revenue"}
+-    second = metric_api_handler(_event("/namespaces/{namespaceId}/metrics", _metric_body("m-1")), None)
++    second = create_handler(_event("/namespaces/{namespaceId}/metrics", _metric_body("m-1")), None)
+ 
+     assert first["statusCode"] == 201, first["body"]
+     assert (second["statusCode"], second["body"]) == (201, first["body"])
+@@ -103,9 +103,9 @@
+         patch("coa_metrics.api.import_job_store.create_job", return_value={"jobId": "j-1"}) as create_job,
+     ):
+         body = {"content": content, "clientToken": "osi-1"}
+-        first = metric_api_handler(_event("/namespaces/{namespaceId}/metrics/import-osi", body), None)
+-        second = metric_api_handler(_event("/namespaces/{namespaceId}/metrics/import-osi", body), None)
+-        changed = metric_api_handler(
++        first = import_osi.handler(_event("/namespaces/{namespaceId}/metrics/import-osi", body), None)
++        second = import_osi.handler(_event("/namespaces/{namespaceId}/metrics/import-osi", body), None)
++        changed = import_osi.handler(
+             _event("/namespaces/{namespaceId}/metrics/import-osi", {**body, "content": content + "# v2\n"}), None
+         )
+ 
+--- a/packages/metric-service/tests/unit/test_metric_api_handler.py
++++ b/packages/metric-service/tests/unit/test_metric_api_handler.py
+@@ -1,167 +1,28 @@
+ # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ # SPDX-License-Identifier: Apache-2.0
+-
+-"""Unit tests for the combined metric API router (metric_api_handler)."""
+-
+-from __future__ import annotations
+-
++"""The metric API remains closed until source permissions can be verified."""
+ import json
+ from unittest.mock import patch
+ 
+ import pytest
++from coa_metrics.api.metric_api_handler import handler
+ 
+-pytestmark = pytest.mark.unit
+ 
+-
+-def _event(method: str, resource: str, *, name: str | None = None) -> dict:
+-    path_params: dict[str, str] = {"namespaceId": "ns-1"}
+-    if name is not None:
+-        path_params["name"] = name
+-    return {"httpMethod": method, "resource": resource, "pathParameters": path_params}
+-
+-
+-class TestOsiRouting:
+-    """OSI import/export routes must dispatch to their dedicated handlers."""
+-
+-    def test_upload_url_route_dispatches_to_upload_url_handler(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        with patch.object(metric_api_handler, "get_osi_upload_url_handler", return_value={"ok": "upload"}) as h:
+-            result = metric_api_handler.handler(
+-                _event("POST", "/namespaces/{namespaceId}/metrics/import-osi/upload-url"), None
+-            )
+-
+-        assert result == {"ok": "upload"}
+-        h.assert_called_once()
+-
+-    def test_import_osi_route_dispatches_to_import_handler(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        with patch.object(metric_api_handler, "import_osi_handler", return_value={"ok": "import"}) as h:
+-            result = metric_api_handler.handler(_event("POST", "/namespaces/{namespaceId}/metrics/import-osi"), None)
+-
+-        assert result == {"ok": "import"}
+-        h.assert_called_once()
+-
+-    def test_export_osi_route_dispatches_to_export_handler(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        with patch.object(metric_api_handler, "export_osi_handler", return_value={"ok": "export"}) as h:
+-            result = metric_api_handler.handler(_event("GET", "/namespaces/{namespaceId}/metrics/export-osi"), None)
+-
+-        assert result == {"ok": "export"}
+-        h.assert_called_once()
+-
+-    def test_import_jobs_route_dispatches_to_get_import_job_handler(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        with patch.object(metric_api_handler, "get_import_job_handler", return_value={"ok": "job"}) as h:
+-            result = metric_api_handler.handler(
+-                _event("GET", "/namespaces/{namespaceId}/metrics/import-jobs/{jobId}"), None
+-            )
+-
+-        assert result == {"ok": "job"}
+-        h.assert_called_once()
+-
+-    def test_bulk_delete_route_dispatches_to_bulk_delete_handler(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        with patch.object(metric_api_handler, "bulk_delete_handler", return_value={"ok": "bulk"}) as h:
+-            result = metric_api_handler.handler(
+-                _event("POST", "/namespaces/{namespaceId}/metrics/bulk-delete-metrics"), None
+-            )
+-
+-        assert result == {"ok": "bulk"}
+-        h.assert_called_once()
+-
+-
+-class TestCrudRouting:
+-    """CRUD + validate routes must dispatch by method and presence of {name}."""
+-
+-    def test_validate_route_dispatches_to_validate_handler(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        with patch.object(metric_api_handler, "validate_handler", return_value={"ok": "validate"}) as h:
+-            result = metric_api_handler.handler(_event("POST", "/namespaces/{namespaceId}/metrics/validate"), None)
+-
+-        assert result == {"ok": "validate"}
+-        h.assert_called_once()
+-
+-    def test_post_dispatches_to_create_handler(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        with patch.object(metric_api_handler, "create_handler", return_value={"ok": "create"}) as h:
+-            result = metric_api_handler.handler(_event("POST", "/namespaces/{namespaceId}/metrics"), None)
+-
+-        assert result == {"ok": "create"}
+-        h.assert_called_once()
+-
+-    def test_get_with_name_dispatches_to_get_handler(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        with patch.object(metric_api_handler, "get_handler", return_value={"ok": "get"}) as h:
+-            result = metric_api_handler.handler(
+-                _event("GET", "/namespaces/{namespaceId}/metrics/{name}", name="revenue"), None
+-            )
+-
+-        assert result == {"ok": "get"}
+-        h.assert_called_once()
+-
+-    def test_get_without_name_dispatches_to_list_handler(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        with patch.object(metric_api_handler, "list_handler", return_value={"ok": "list"}) as h:
+-            result = metric_api_handler.handler(_event("GET", "/namespaces/{namespaceId}/metrics"), None)
+-
+-        assert result == {"ok": "list"}
+-        h.assert_called_once()
+-
+-    def test_put_with_name_dispatches_to_update_handler(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        with patch.object(metric_api_handler, "update_handler", return_value={"ok": "update"}) as h:
+-            result = metric_api_handler.handler(
+-                _event("PUT", "/namespaces/{namespaceId}/metrics/{name}", name="revenue"), None
+-            )
+-
+-        assert result == {"ok": "update"}
+-        h.assert_called_once()
+-
+-    def test_delete_with_name_dispatches_to_delete_handler(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        with patch.object(metric_api_handler, "delete_handler", return_value={"ok": "delete"}) as h:
+-            result = metric_api_handler.handler(
+-                _event("DELETE", "/namespaces/{namespaceId}/metrics/{name}", name="revenue"), None
+-            )
+-
+-        assert result == {"ok": "delete"}
+-        h.assert_called_once()
+-
+-
+-class TestMethodNotAllowed:
+-    """Unmatched method/path combinations return 405."""
+-
+-    def test_unmatched_method_returns_405(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        result = metric_api_handler.handler(_event("PATCH", "/namespaces/{namespaceId}/metrics"), None)
+-
+-        assert result["statusCode"] == 405
+-        assert result["headers"]["Allow"] == "GET, POST, PUT, DELETE"
+-        assert json.loads(result["body"])["message"] == "Method not allowed"
+-
+-    def test_put_without_name_is_not_allowed(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        # PUT requires a metric name; without one it falls through to 405.
+-        result = metric_api_handler.handler(_event("PUT", "/namespaces/{namespaceId}/metrics"), None)
+-
+-        assert result["statusCode"] == 405
+-
+-    def test_delete_without_name_is_not_allowed(self):
+-        from coa_metrics.api import metric_api_handler
+-
+-        result = metric_api_handler.handler(_event("DELETE", "/namespaces/{namespaceId}/metrics"), None)
+-
+-        assert result["statusCode"] == 405
++@pytest.mark.parametrize("method,resource", [
++    ("GET", "/namespaces/{namespaceId}/metrics"),
++    ("GET", "/namespaces/{namespaceId}/metrics/{name}"),
++    ("GET", "/namespaces/{namespaceId}/export-osi"),
++    ("POST", "/namespaces/{namespaceId}/metrics/validate"),
++    ("POST", "/namespaces/{namespaceId}/metrics"),
++    ("PUT", "/namespaces/{namespaceId}/metrics/{name}"),
++    ("DELETE", "/namespaces/{namespaceId}/metrics/{name}"),
++    ("GET", "/unknown"),
++])
++@pytest.mark.parametrize("namespace", ["sales", "finance"])
++def test_metric_api_denies_all_routes_without_backend(method, resource, namespace):
++    event = {"httpMethod": method, "resource": resource, "pathParameters": {"namespaceId": namespace, "name": "a"}}
++    with patch("boto3.client") as client:
++        response = handler(event, None)
++    assert response["statusCode"] == 403
++    assert json.loads(response["body"])["message"] == "Metric access is disabled"
++    client.assert_not_called()
