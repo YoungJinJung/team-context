@@ -13,7 +13,7 @@ import connectors
 from storage import persist, search, remove_public_source, cleanup_unavailable, list_public_sources
 from auth.sessions import Sessions
 from auth.providers import PROVIDERS
-from auth import atlassian_preview
+from auth import atlassian_preview, github_private
 from auth import linear_preview, teams, teams_preview, gitlab, gitlab_preview, gitlab_private, github, github_preview
 from botocore.exceptions import BotoCoreError, ClientError
 
@@ -145,6 +145,19 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": "Atlassian preview unavailable"})
             except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
                 return self.send(502, {"error": "Unable to load Atlassian data"})
+        if parsed.path == "/api/github/private/search":
+            if self.headers.get("Host") != "127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid host"})
+            params = urllib.parse.parse_qs(parsed.query)
+            repository = params.get("repository", [""])[0]
+            query = params.get("q", [""])[0]
+            try:
+                result = GITHUB_SESSIONS.use(self.cookie("team_context_github_session"), lambda token: github_private.search(token, repository, query))
+                return self.send(200, {"items": result})
+            except ValueError:
+                return self.send(400, {"error": "Private search unavailable"})
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+                return self.send(502, {"error": "Unable to search private data"})
         if parsed.path == "/api/gitlab/private/search":
             if self.headers.get("Host") != "127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid host"})
@@ -236,6 +249,23 @@ class Handler(BaseHTTPRequestHandler):
         for provider in PROVIDERS.values():
             if self.path in (f"/api/{provider.id}/start", f"/api/{provider.id}/disconnect"):
                 return self.oauth_manage(provider)
+        if self.path == "/api/github/private/collect":
+            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
+                return self.send(403, {"error": "Invalid origin"})
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 4096:
+                    raise ValueError("Invalid request size")
+                payload = json.loads(self.rfile.read(length))
+                if not isinstance(payload, dict) or not isinstance(payload.get("repository"), str):
+                    raise ValueError("Invalid repository")
+                with STORAGE_LOCK:
+                    count = GITHUB_SESSIONS.use(self.cookie("team_context_github_session"), lambda token: github_private.collect(token, payload["repository"]))
+                return self.send(200, {"count": count})
+            except ValueError:
+                return self.send(400, {"error": "Private collection unavailable"})
+            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+                return self.send(502, {"error": "Unable to collect private data"})
         if self.path == "/api/gitlab/private/collect":
             if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid origin"})

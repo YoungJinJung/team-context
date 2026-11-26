@@ -426,3 +426,33 @@ def test_mcp_search_excludes_private_snapshots_and_revalidates_public():
     finally:
         s3.delete_object(Bucket='team-context-records', Key=key)
         s3.delete_object(Bucket='team-context-records', Key=private_key)
+
+
+def test_github_private_snapshot_requires_requester_and_revalidates_original():
+    from unittest.mock import patch
+    from urllib.error import HTTPError
+    from uuid import uuid4
+    from auth import github_private
+    project_id = int(uuid4().hex[:10],16) or 1
+    record = {'number':1,'base':{'repo':{'id':project_id}},'title':'local secret phrase','html_url':'https://github.com/a/b/pull/1','updated_at':'2026-01-01','body':'private body'}
+    meta = {'id':project_id,'full_name':'a/b'}
+    key = f'private/github/{project_id}.json'
+    s3, _ = clients()
+    def provider(token,path):
+        if token != 'allowed':
+            raise HTTPError('https://api.github.com',404,'hidden',{},None)
+        if path == 'repos/a/b': return meta
+        if path.endswith('page=1'): return [record]
+        if path.endswith('page=2'): return []
+        if path == 'repos/a/b/pulls/1': return record
+        raise AssertionError(path)
+    try:
+        with patch('auth.github_private._get',side_effect=provider):
+            assert github_private.collect('allowed','a/b') == 1
+            assert github_private.search('allowed','a/b','secret phrase')[0]['title'] == 'local secret phrase'
+            with pytest.raises(HTTPError): github_private.search('other','a/b','secret phrase')
+        with patch('auth.github_private._get',side_effect=[meta,{**record,'title':'changed'}]):
+            assert github_private.search('allowed','a/b','secret phrase') == []
+        assert json.loads(s3.get_object(Bucket='team-context-records',Key=key)['Body'].read())['visibility'] == 'private'
+    finally:
+        s3.delete_object(Bucket='team-context-records',Key=key)

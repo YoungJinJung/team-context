@@ -6,13 +6,13 @@ Team Context는 업무 도구별 데이터를 공통 형태로 연결하려는 �
 
 | 공급자 | 현재 동작 | 아직 없는 기능 |
 | --- | --- | --- |
-| GitHub.com | 공개 PR 수집·검색, GitHub App 사용자 OAuth와 비공개 PR 미리보기 | 비공개 PR 저장·검색, 소스 파일 수집, GitHub Enterprise |
+| GitHub.com | 공개 PR 수집·검색, GitHub App 사용자 OAuth와 비공개 PR 로컬 수집·권한 재확인 검색 | 소스 파일 수집, GitHub Enterprise, 자동 권한·삭제 전파 |
 | GitLab.com | 공개 MR 수집·검색, OAuth PKCE, 비공개 MR 로컬 수집·권한 재확인 검색 | 소스 파일 수집, 자체 호스팅, 자동 권한·삭제 전파 |
 | Linear | OAuth PKCE, 팀·이슈 미리보기 | 이슈 저장·동기화 |
 | Microsoft Teams | Entra OAuth PKCE, 팀·채널 첫 페이지 미리보기 | 채팅·메시지 수집, 전체 페이지 조회 |
 | Jira · Confluence | Atlassian 3LO OAuth, 접근 가능한 사이트와 제품별 부여 범위 미리보기 | 문서·티켓 수집 및 개별 항목 권한 검증 |
 
-미리보기는 브라우저 응답으로만 제공하며 공용 검색에 저장하지 않습니다. GitLab 비공개 MR 스냅샷은 별도 로컬 S3 키에 저장됩니다. 현재 LocalStack은 실제 조직 토큰이나 비공개 자료를 안전하게 보호하는 운영용 저장소가 아닙니다.
+미리보기는 브라우저 응답으로만 제공하며 공용 검색에 저장하지 않습니다. GitHub 비공개 PR과 GitLab 비공개 MR 스냅샷은 각각 별도 로컬 S3 키에 저장됩니다. 현재 LocalStack은 실제 조직 토큰이나 비공개 자료를 안전하게 보호하는 운영용 저장소가 아닙니다.
 
 ## 공개 소스 커넥터 계약
 
