@@ -1,0 +1,71 @@
+--- a/infra/lib/stacks/services/serve-stack.ts
++++ b/infra/lib/stacks/services/serve-stack.ts
+@@ -748,6 +748,23 @@
+         description: "Context Manager orchestration service",
+       });
+ 
++      // Private-source access requires every runtime invocation to pass through the gateway.
++      const gatewayArn = this.node.tryGetContext("team_context_gateway_arn");
++      const gatewayMatch = typeof gatewayArn === "string"
++        ? /^arn:(aws(?:-[a-z]+)*):bedrock-agentcore:([a-z0-9-]+):([0-9]{12}):gateway\/((?:[0-9a-z]-?){1,100}-[0-9a-z]{10})$/.exec(gatewayArn)
++        : null;
++      if (!gatewayMatch || gatewayMatch[2] !== region || gatewayMatch[3] !== account) {
++        throw new Error("team_context_gateway_arn must identify a gateway in this account and region");
++      }
++      const cfnRuntime = runtime.node.defaultChild;
++      if (!(cfnRuntime instanceof cdk.CfnResource)) {
++        throw new Error("Cannot restrict the Context Manager runtime");
++      }
++      cfnRuntime.addPropertyOverride(
++        "AuthorizerConfiguration.CustomJWTAuthorizer.AllowedWorkloadConfiguration",
++        { HostingEnvironments: [{ Arn: gatewayArn }] },
++      );
++
+       // Grant runtime access to Memory (short-term read/write for session history)
+       memory.grantWrite(runtime);
+       memory.grantRead(runtime);
+--- a/infra/test/services/serve-stack.test.ts
++++ b/infra/test/services/serve-stack.test.ts
+@@ -27,6 +27,8 @@
+ const BASE_CONTEXT = {
+   resource_prefix: DEFAULT_RESOURCE_PREFIX,
+   env: DEFAULT_ENV,
++  team_context_gateway_arn:
++    "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
+   context_manager_image_uri:
+     "123456789012.dkr.ecr.us-east-1.amazonaws.com/coa-dev:latest",
+   "aws:cdk:bundling-stacks": [],
+@@ -66,7 +68,33 @@
+ 
+   return Template.fromStack(stack);
+ }
++
++describe("ServeStack - gateway-only runtime", () => {
++  it("restricts the runtime to the configured gateway", () => {
++    createStack().hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
++      AuthorizerConfiguration: {
++        CustomJWTAuthorizer: Match.objectLike({
++          AllowedWorkloadConfiguration: Match.exact({
++            HostingEnvironments: [{ Arn: BASE_CONTEXT.team_context_gateway_arn }],
++          }),
++        }),
++      },
++    });
++  });
+ 
++  it.each([
++    undefined,
++    "",
++    "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/*",
++    "arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/tc-0123456789",
++    "arn:aws:bedrock-agentcore:us-east-1:999999999999:gateway/tc-0123456789",
++  ])("rejects an invalid gateway: %s", (gatewayArn) => {
++    expect(() => createStack({ team_context_gateway_arn: gatewayArn })).toThrow(
++      "team_context_gateway_arn must identify a gateway in this account and region",
++    );
++  });
++});
++
+ describe("ServeStack - Security Group egress", () => {
+   describe("without JDBC peer CIDRs", () => {
+     let template: Template;
