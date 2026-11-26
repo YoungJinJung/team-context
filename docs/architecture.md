@@ -38,7 +38,8 @@ COA의 권한 기능을 설치하는 것만으로 GitHub, GitLab, Jira, Confluen
 | GitLab.com 비공개 MR | 로컬 실험 | OAuth PKCE, 프로젝트 ID별 스냅샷, 조회자의 토큰으로 프로젝트·원본 재검증. 실제 조직 데이터를 LocalStack에 넣지 않음. |
 | GitHub 비공개 PR | 미리보기 | GitHub App 사용자 OAuth. 저장·공유 검색은 미구현. 앱 클라이언트 비밀은 개인 토큰과 별개로 서버 측 비밀 저장 필요. |
 | Linear · Microsoft Teams | 미리보기 | Linear 팀·이슈, Teams 팀·채널. 이슈 저장 및 Teams 메시지 수집은 미구현. |
-| Jira · Confluence · 자체 호스팅 | 미구현 | Jira/Confluence와 GitHub Enterprise·자체 호스팅 GitLab 지원 예정. |
+| Jira · Confluence | 미리보기 | Atlassian OAuth로 사이트와 부여된 제품 범위를 확인. 문서·티켓 수집과 개별 항목 권한 검증은 미구현. |
+| 자체 호스팅 | 미구현 | GitHub Enterprise·자체 호스팅 GitLab 지원 예정. |
 | 인증·접근 | 로컬 실험 | 공급자별 세션과 로컬 토큰 저장. 운영용 사용자/테넌트 격리, 중앙 감사, 자동 권한·삭제 전파는 미구현. |
 | 온톨로지 · AWS 배포 | 미구현 | COA, MCP, Neptune, OpenSearch, AWS IaC 및 배포는 미구현. |
 

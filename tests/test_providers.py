@@ -7,11 +7,11 @@ from auth import session_store
 
 
 def test_registry_is_immutable_and_has_isolated_bindings():
-    assert set(PROVIDERS) == {'linear', 'teams', 'gitlab', 'github'}
+    assert set(PROVIDERS) == {'linear', 'teams', 'gitlab', 'github', 'atlassian'}
     with pytest.raises(TypeError):
         PROVIDERS['new'] = PROVIDERS['linear']
     session = 'a' * 43
-    assert len({session_store._key(session, p.namespace) for p in PROVIDERS.values()}) == 4
+    assert len({session_store._key(session, p.namespace) for p in PROVIDERS.values()}) == 5
 
 
 @pytest.mark.parametrize('changes', [
