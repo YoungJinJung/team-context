@@ -218,3 +218,48 @@ def test_source_response_read_is_bounded():
     with patch('auth.github_private.open_url',return_value=response):
         assert private._get('token','repos/a/b')=={}
     response.read.assert_called_once_with(private.MAX_BYTES+1)
+
+
+def test_exact_response_byte_limit_is_accepted():
+    class Response(io.BytesIO):
+        def __enter__(self): return self
+        def __exit__(self,*args): self.close()
+    with patch('auth.github_private.MAX_BYTES',3), patch('auth.github_private.open_url',return_value=Response(b'{} ')):
+        assert private._get('token','repos/a/b') == {}
+
+
+def test_unicode_snapshot_uses_exact_byte_limit_and_preserves_text():
+    item=pull(title='한글 제목',body='문서')
+    expected={'visibility':'private','repository_id':42,'records':[private._record(item,42,'a/b')]}
+    encoded=json.dumps(expected,ensure_ascii=False).encode()
+    for limit, succeeds in ((len(encoded),True),(len(encoded)-1,False)):
+        s3=Mock()
+        with patch('auth.github_private.MAX_BYTES',limit), patch('auth.github_private._get',side_effect=[{'id':42,'full_name':'a/b'},[item],[]]), patch('auth.github_private.clients',return_value=(s3,Mock())):
+            if succeeds:
+                assert private.collect('token','a/b') == 1
+                assert s3.put_object.call_args.kwargs['Body'] == encoded
+            else:
+                with pytest.raises(ValueError,match='Snapshot too large'): private.collect('token','a/b')
+                s3.put_object.assert_not_called()
+
+
+def test_snapshot_read_is_bounded_and_exact_limit_is_accepted():
+    encoded=json.dumps(snapshot()).encode()
+    stream=Mock();stream.read.return_value=encoded
+    s3=Mock();s3.get_object.return_value={'Body':stream}
+    with patch('auth.github_private.MAX_BYTES',len(encoded)), patch('auth.github_private._get',side_effect=[{'id':42,'full_name':'a/b'},pull()]), patch('auth.github_private.clients',return_value=(s3,Mock())):
+        assert private.search('viewer','a/b','secret') == snapshot()['records']
+    stream.read.assert_called_once_with(len(encoded)+1)
+    stream.close.assert_called_once()
+
+
+def test_search_can_match_across_title_and_body_boundary():
+    with patch('auth.github_private._get',side_effect=[{'id':42,'full_name':'a/b'},pull()]), patch('auth.github_private.clients',return_value=(s3_with(snapshot()),Mock())):
+        assert private.search('viewer','a/b','title secret') == snapshot()['records']
+
+
+def test_repository_metadata_error_is_precise_and_does_not_echo_response():
+    with patch('auth.github_private._get',return_value={'id':'secret','full_name':'a/b'}):
+        with pytest.raises(ValueError,match='^Invalid repository$') as error:
+            private._repository('token','a/b')
+    assert 'secret' not in str(error.value)
