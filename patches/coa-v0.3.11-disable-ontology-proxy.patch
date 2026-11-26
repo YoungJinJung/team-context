@@ -155,9 +155,9 @@
 +    expect(proxy.Properties.Handler).toBe("index.handler");
 +    const code = proxy.Properties.Code.ZipFile;
 +    expect(typeof code).toBe("string");
-+    const probe = `${code}\nimport json\nevents = [{}, {"httpMethod": "GET", "resource": "/namespaces/{namespaceId}/graph/search"}, {"httpMethod": "POST", "resource": "/namespaces/{namespaceId}/embeddings/search"}, {"httpMethod": "GET", "resource": "/namespaces/{namespaceId}/ontologies/{ontologyId}/download"}, {"httpMethod": "DELETE", "resource": "/namespaces/{namespaceId}/ontologies"}]\nprint(json.dumps([handler(e, None) for e in events]))`;
++    const probe = `${code}\nimport json\nevents = [None, "malformed", [], {}, {"httpMethod": "GET", "resource": "/namespaces/{namespaceId}/graph/search"}, {"httpMethod": "POST", "resource": "/namespaces/{namespaceId}/embeddings/search"}, {"httpMethod": "GET", "resource": "/namespaces/{namespaceId}/ontologies/{ontologyId}/download"}, {"httpMethod": "DELETE", "resource": "/namespaces/{namespaceId}/ontologies"}]\nprint(json.dumps([handler(e, None) for e in events]))`;
 +    const output = JSON.parse(execFileSync("python3", ["-c", probe], { encoding: "utf8" }));
-+    expect(output).toHaveLength(5);
++    expect(output).toHaveLength(8);
 +    for (const result of output) {
 +      expect(result.statusCode).toBe(403);
 +      expect(JSON.parse(result.body)).toEqual({ message: "Ontology API is disabled" });
