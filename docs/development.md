@@ -29,6 +29,7 @@ TEAM_CONTEXT_INTEGRATION=1 uv run --no-sync pytest -q tests/test_localstack.py
 # 기존 mutants/ 결과를 지운 뒤 전체 백엔드 변이 검사
 python3 -c "import shutil; shutil.rmtree('mutants', ignore_errors=True)"
 uv run --no-sync mutmut run --max-children 4
+uv run --no-sync mutmut run --max-children 2 'auth.coa_identity.*'
 uv run --no-sync mutmut export-cicd-stats
 uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
 ```
