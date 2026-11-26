@@ -90,3 +90,22 @@ def test_expiry_must_be_in_the_supported_window(setup,expires_at,allowed):
             assert service.resolve('Bearer alice','github').provider_user_id==42
         else:
             with pytest.raises(ValueError): service.resolve('Bearer alice','github')
+
+
+def test_valid_credential_with_duplicate_identity_is_rejected(setup):
+    service,_,secrets=setup
+    secrets.get_secret_value.return_value={'SecretString':'{"subject":"bob",'+json.dumps(PAYLOAD)[1:]}
+    with patch('auth.source_credentials.time.time',return_value=1000):
+        with pytest.raises(ValueError): service.resolve('Bearer alice','github')
+
+
+@pytest.mark.parametrize('size,allowed',[(65536,True),(65537,False)])
+def test_secret_size_limit_with_valid_json(setup,size,allowed):
+    service,_,secrets=setup
+    raw=json.dumps(PAYLOAD);raw += ' '*(size-len(raw))
+    secrets.get_secret_value.return_value={'SecretString':raw}
+    with patch('auth.source_credentials.time.time',return_value=1000):
+        if allowed:
+            assert service.resolve('Bearer alice','github').provider_user_id==42
+        else:
+            with pytest.raises(ValueError): service.resolve('Bearer alice','github')
