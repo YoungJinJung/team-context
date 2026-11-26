@@ -34,6 +34,7 @@ uv run --no-sync mutmut run --max-children 2 'auth.link_attempts.*'
 uv run --no-sync mutmut run --max-children 2 'auth.link_completion.*'
 uv run --no-sync mutmut run --max-children 2 'auth.source_credentials.*'
 uv run --no-sync mutmut run --max-children 2 'auth.source_provenance.*'
+uv run --no-sync mutmut run --max-children 2 'scripts.check_coa_gateway.*'
 uv run --no-sync mutmut export-cicd-stats
 uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
 ```
@@ -49,6 +50,21 @@ COA 인증과 계정 연결 모듈은 HTTP 엔드포인트나 MCP에 연결되�
 내부 자격 증명 조회는 매 요청에서 COA 신원을 검증하고 사용자와 공급자가 일치하는 만료 전 토큰만 반환합니다. 이 값은 내부 코드 전용이며 로그나 HTTP·MCP 응답에 포함하면 안 됩니다. 토큰 갱신과 COA 조회 경로의 원본 접근 권한 강제는 아직 구현하지 않았습니다.
 
 GitHub.com PR과 GitLab.com MR의 내부 출처 검증은 조회자의 연결된 토큰으로 저장소 ID와 원본 항목을 다시 확인하고 수집 시 기록한 정규화된 내용의 해시가 현재 내용과 일치할 때만 허용합니다. 정규화된 내용은 현재 제목, 본문, URL, 수정 시각과 항목·저장소 ID로 제한되며 코드 변경 내용과 댓글은 포함하지 않습니다. 출처 목록은 신뢰할 수 있는 완전한 인덱스에서 제공해야 합니다. 아직 이 인덱스, COA 조회 전 필터링, 다른 공급자와 직접 접근 경로 차단이 없으므로 이 구성요소만으로 비공개 COA 조회를 활성화할 수 없습니다.
+
+## COA 런타임의 Gateway 제한 확인
+
+배포된 AgentCore Runtime의 엔드포인트와 활성 버전이 지정한 Gateway만 허용하는지 읽기 전용으로 점검할 수 있습니다. AWS 자격 증명은 SDK 기본 공급자 체인으로 제공하고, 실제 값을 명령이나 저장소에 넣지 마세요.
+
+```sh
+uv run --no-sync python -m scripts.check_coa_gateway \
+  --region us-east-1 \
+  --runtime-arn 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/Example-0123456789' \
+  --gateway-arn 'arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/example'
+```
+
+이 명령은 `ListAgentRuntimeEndpoints`, `GetAgentRuntime` 권한이 필요하며 IAM 역할 등 AWS의 임시 자격 증명을 사용합니다. `allowedWorkloadConfiguration`을 인식하는 최신 boto3/botocore가 필요합니다. 페이지 전체와 각 활성 버전을 확인하며, 여러 Gateway나 별도 workload identity가 허용되어 있으면 실패합니다. 엔드포인트 목록이 검사 중 바뀌어도 실패합니다.
+
+이 점검은 읽기 전용이며 설정을 변경하거나 접근을 차단하지 않습니다. 성공은 특정 시점의 런타임 설정만 뜻합니다. 이후 설정 변경, 다른 런타임·API·스토리지 우회, Gateway 정책과 원본 권한, 모델에 전달되는 데이터의 출처는 확인하지 않으므로 성공을 비공개 자료 사용 승인으로 취급하면 안 됩니다. AgentCore는 현재 LocalStack 통합 범위에 없어 AWS SDK 스텁으로만 테스트합니다. 실제 차단은 Gateway 전용 런타임 설정과 별도의 권한·배포 검증이 필요합니다. [AWS 런타임 인증 문서](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-oauth.html)에서 설정과 지원 조건을 확인하세요.
 
 로컬 GitLab 비공개 스냅샷 목록·삭제 명령도 README에 있습니다. 이 명령은 로컬 운영자용이며, 운영 환경의 관리자 권한 또는 보존 정책을 대신하지 않습니다.
 

@@ -12,6 +12,8 @@ The diagram is a **proposed AWS architecture**, not the current deployment. See 
 
 [AWS Context Ontology Accelerator](https://github.com/aws/context-ontology-accelerator) has its own MCP server and OIDC/Cognito and Cedar authorization. Team Context's local MCP is a separate public-search prototype; this repository does not yet connect to COA. COA namespace permissions alone do not establish that a requester can access each original GitHub, GitLab, Jira, Confluence, or Teams item. Identity-to-connector binding, source permission checks, derived-data provenance, and deletion and revocation propagation remain open in [issue #68](https://github.com/YoungJinJung/team-context/issues/68). Do not use the prototype to serve company private data. Optional COA v0.3.11 identity-verification and account-linking components exist for Python 3.12+, but are not exposed through HTTP or connected to the MCP server. Disconnecting a stored binding does not revoke the provider grant or delete collected data.
 
+The optional [runtime gateway check](docs/development.md#coa-런타임의-gateway-제한-확인) inspects an existing AgentCore Runtime's current configuration. It does not change access controls or verify that private retrieval is safe.
+
 ## What works today
 
 | Source | Available in the local prototype | Not available yet |
@@ -131,6 +133,7 @@ uv run --no-sync mutmut run --max-children 2 'auth.link_attempts.*'
 uv run --no-sync mutmut run --max-children 2 'auth.link_completion.*'
 uv run --no-sync mutmut run --max-children 2 'auth.source_credentials.*'
 uv run --no-sync mutmut run --max-children 2 'auth.source_provenance.*'
+uv run --no-sync mutmut run --max-children 2 'scripts.check_coa_gateway.*'
 uv run --no-sync mutmut export-cicd-stats
 uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
 ```
