@@ -364,6 +364,45 @@
  # Error types the Context Manager itself emits (``coa_serve.exceptions`` plus the
  # entrypoint's own validation/internal errors). An HTTP error body carrying one of
  # these is our service's structured, client-safe error; anything else came from
+--- a/packages/data-layer/tests/unit/test_api_contract_conformance.py
++++ b/packages/data-layer/tests/unit/test_api_contract_conformance.py
+@@ -52,13 +52,14 @@
+     Path(__file__).resolve().parents[4] / "smithy-generated" / "openapi" / "openapi" / "DataLayerService.openapi.json"
+ )
+ 
+-# Operations checked. Every DataLayerService operation is; a new one must be added.
++# Every operation is either checked for forwarding or explicitly disabled.
+ #
+ # "Read" means the handler validates and forwards the member. GraphTraverse's
+ # ``direction`` and ``relationshipFilter`` are read (and so pass here) but not yet
+ # applied by the Context Manager; the model's member docs say so, rather than this
+ # list hiding them.
+-_CHECKED_OPERATIONS = ("Query", "TranslateSPARQL", "KBSearch", "GraphTraverse", "DescribeSchema")
++_CHECKED_OPERATIONS = ("Query", "TranslateSPARQL", "KBSearch", "GraphTraverse")
++_DISABLED_OPERATIONS = {"DescribeSchema"}
+ 
+ # The variable names the handlers bind the parsed request body / query string to.
+ _BODY_NAMES = {"body"}
+@@ -208,10 +209,18 @@
+ 
+ def test_every_operation_is_checked():
+     """A new DataLayerService operation must be added to the check, not missed by it."""
+-    unaccounted = set(_operations(_spec())) - set(_CHECKED_OPERATIONS)
++    operations = set(_operations(_spec()))
++    assert _DISABLED_OPERATIONS <= operations
++    unaccounted = operations - set(_CHECKED_OPERATIONS) - _DISABLED_OPERATIONS
+     assert not unaccounted, f"add these operations to _CHECKED_OPERATIONS: {sorted(unaccounted)}"
+ 
+ 
++def test_disabled_schema_operation_routes_to_the_deny_handler():
++    assert _handler_for("GET", "/namespaces/{namespaceId}/schema") == "_handle_describe_schema"
++    response = handler_module._handle_describe_schema("sales", {})
++    assert response["statusCode"] == 403
++
++
+ def test_scanner_detects_reads_and_follows_helpers():
+     """Negative control: the scanner sees reads made inside a called helper.
+ 
 --- a/packages/data-layer/tests/unit/test_contract_bounds.py
 +++ b/packages/data-layer/tests/unit/test_contract_bounds.py
 @@ -555,43 +555,13 @@

@@ -127,6 +127,7 @@ jobs:
             coa-upstream/packages/data-layer/tests/unit/test_handler_validation.py \
             coa-upstream/packages/data-layer/tests/unit/test_contract_bounds.py \
             coa-upstream/packages/data-layer/tests/unit/test_rest_deadline_ordering.py \
+            coa-upstream/packages/data-layer/tests/unit/test_api_contract_conformance.py \
             coa-upstream/packages/mcp-server/tests/unit/test_server.py
       - name: Test schema lockdown stack synthesis
         working-directory: coa-upstream
