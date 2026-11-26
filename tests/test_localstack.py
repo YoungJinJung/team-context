@@ -530,6 +530,7 @@ def test_link_completion_is_bound_to_identity_and_uses_kms_secrets():
     from auth.link_attempts import LinkAttempts
     from auth.link_completion import LinkCompletion, _secret_name
     from auth.source_credentials import SourceCredentials
+    from auth.source_provenance import SourceProvenance, content_digest
 
     opts={'endpoint_url':'http://127.0.0.1:4568','region_name':'us-east-1','aws_access_key_id':'local','aws_secret_access_key':'local'}
     db=boto3.client('dynamodb',**opts);kms=boto3.client('kms',**opts);secrets=boto3.client('secretsmanager',**opts)
@@ -555,11 +556,19 @@ def test_link_completion_is_bound_to_identity_and_uses_kms_secrets():
         resolver=SourceCredentials(verifier,secrets,prefix)
         assert resolver.resolve('Bearer alice','gitlab').access_token=='fake-access'
         with pytest.raises(ValueError): resolver.resolve('Bearer bob','gitlab')
+        guard=SourceProvenance(resolver)
+        record={'iid':5,'project_id':17,'title':'fixture','body':'text','url':'https://gitlab.com/acme/repo/-/merge_requests/5','updated_at':'2026-01-01'}
+        item={'iid':5,'project_id':17,'title':'fixture','description':'text','web_url':record['url'],'updated_at':record['updated_at']}
+        provenance={'provider':'gitlab','project':'acme/repo','scope_id':17,'number':5,'digest':content_digest(record)}
+        with patch('auth.gitlab_private.open_url',side_effect=[io.BytesIO(b'{"id":17}'),io.BytesIO(json.dumps(item).encode())]):
+            assert guard.allows('Bearer alice',provenance) is True
+        assert guard.allows('Bearer bob',provenance) is False
         with pytest.raises(ValueError): service.complete('Bearer alice','gitlab',state,start.browser_nonce,'code')
         assert service.disconnect('Bearer bob','gitlab')=={'connected':False}
         assert secrets.get_secret_value(SecretId=name)['SecretString']==stored['SecretString']
         assert service.disconnect('Bearer alice','gitlab')=={'connected':False}
         with pytest.raises(ValueError): resolver.resolve('Bearer alice','gitlab')
+        assert guard.allows('Bearer alice',provenance) is False
         with pytest.raises(ClientError): secrets.get_secret_value(SecretId=name)
     finally:
         try: secrets.delete_secret(SecretId=name,ForceDeleteWithoutRecovery=True)

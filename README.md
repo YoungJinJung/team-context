@@ -130,6 +130,7 @@ uv run --no-sync mutmut run --max-children 2 'auth.coa_identity.*'
 uv run --no-sync mutmut run --max-children 2 'auth.link_attempts.*'
 uv run --no-sync mutmut run --max-children 2 'auth.link_completion.*'
 uv run --no-sync mutmut run --max-children 2 'auth.source_credentials.*'
+uv run --no-sync mutmut run --max-children 2 'auth.source_provenance.*'
 uv run --no-sync mutmut export-cicd-stats
 uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
 ```
