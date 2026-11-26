@@ -38,7 +38,7 @@ COA의 권한 기능을 설치하는 것만으로 GitHub, GitLab, Jira, Confluen
 | 로컬 실행 | 구현 | 단일 프로세스 HTTP 서버, LocalStack S3·DynamoDB·Secrets Manager. AWS 배포는 없음. |
 | 공개 GitHub/GitLab | 구현 | GitHub.com PR, GitLab.com MR 수집 및 익명 원본 재검증 검색. 소스 파일 자체는 수집하지 않음. |
 | GitLab.com 비공개 MR | 로컬 실험 | OAuth PKCE, 프로젝트 ID별 스냅샷, 조회자의 토큰으로 프로젝트·원본 재검증. 실제 조직 데이터를 LocalStack에 넣지 않음. |
-| GitHub 비공개 PR | 미리보기 | GitHub App 사용자 OAuth. 저장·공유 검색은 미구현. 앱 클라이언트 비밀은 개인 토큰과 별개로 서버 측 비밀 저장 필요. |
+| GitHub.com 비공개 PR | 로컬 실험 | GitHub App 사용자 OAuth, 저장소 ID별 스냅샷, 조회자의 토큰으로 저장소·원본 재검증. 실제 조직 데이터를 LocalStack에 넣지 않음. |
 | MCP | 로컬 구현 | stdio로 공개 PR/MR 검색과 출처 반환. 비공개 자료와 다중 사용자 인증은 미구현. |
 | Linear · Microsoft Teams | 미리보기 | Linear 팀·이슈, Teams 팀·채널. 이슈 저장 및 Teams 메시지 수집은 미구현. |
 | Jira · Confluence | 미리보기 | Atlassian OAuth로 사이트와 부여된 제품 범위를 확인. 문서·티켓 수집과 개별 항목 권한 검증은 미구현. |
@@ -48,7 +48,7 @@ COA의 권한 기능을 설치하는 것만으로 GitHub, GitLab, Jira, Confluen
 
 공개 커넥터는 `connectors/`의 `MANIFEST`, `connection_id`, `collect` 계약으로 자동 탐색합니다. OAuth 연결 수명주기는 명시적 공급자 레지스트리를 사용합니다. 공급자별 미리보기와 비공개 검색은 별도 구현합니다.
 
-공개 검색은 결과를 반환하기 전 익명으로 원본을 재확인합니다. 비공개 GitLab 검색은 해당 사용자의 토큰으로 프로젝트와 각 MR을 재검증합니다. 원본 권한이 회수되더라도 스냅샷은 자동 삭제되지 않으며, 검증 이후 원본이 바뀌는 시점까지 보호할 수 없습니다. GitLab 수집은 최대 10개 데이터 페이지와 빈 확인 페이지를 조회하고 2 MiB를 넘는 스냅샷을 거절합니다. 수집 중 원본이 바뀌면 누락될 수 있습니다. 자세한 로컬 사용법은 [README](../README.md)를 확인하세요.
+공개 검색은 결과를 반환하기 전 익명으로 원본을 재확인합니다. 비공개 GitHub·GitLab 검색은 해당 사용자의 토큰으로 저장소 또는 프로젝트와 각 PR·MR을 재검증합니다. 원본 권한이 회수되더라도 스냅샷은 자동 삭제되지 않으며, 검증 이후 원본이 바뀌는 시점까지 보호할 수 없습니다. GitLab 수집은 최대 10개 데이터 페이지와 빈 확인 페이지를 조회하고 2 MiB를 넘는 스냅샷을 거절합니다. 수집 중 원본이 바뀌면 누락될 수 있습니다. 자세한 로컬 사용법은 [README](../README.md)를 확인하세요.
 
 ## 비공개 자료와 COA의 보안 경계
 

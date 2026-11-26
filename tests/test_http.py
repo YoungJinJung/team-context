@@ -787,3 +787,33 @@ def test_status_uses_own_provider_cookie(client, provider, session_name, cookie_
         response, data = request(client, 'GET', f'/api/{provider}/status', headers={'Host':'127.0.0.1:8765', 'Cookie':cookie_name + '=own'})
         assert response.status == 200 and json.loads(data) == {'connected':True}
         connected.assert_called_once_with('own')
+
+
+def test_private_github_collect_and_search_use_requester_cookie_and_never_public_storage(client):
+    headers={'Host':'127.0.0.1:8765','Origin':'http://127.0.0.1:8765','Cookie':'team_context_github_session=viewer'}
+    with patch('app.GITHUB_SESSIONS.use') as use, patch('app.github_private.collect',return_value=2) as collect, patch('app.github_private.search',return_value=[{'title':'secret'}]) as search, patch('app.persist') as persist:
+        use.side_effect=lambda cookie, operation: operation('viewer-token')
+        response, data=request(client,'POST','/api/github/private/collect',json.dumps({'repository':'a/b'}),headers)
+        assert response.status==200 and json.loads(data)=={'count':2}
+        collect.assert_called_once_with('viewer-token','a/b')
+        assert use.call_args.args[0]=='viewer'
+        response, data=request(client,'GET','/api/github/private/search?repository=a%2Fb&q=secret',headers=headers)
+        assert response.status==200 and json.loads(data)=={'items':[{'title':'secret'}]}
+        search.assert_called_once_with('viewer-token','a/b','secret')
+        persist.assert_not_called()
+
+
+def test_private_github_routes_reject_origin_bad_payload_and_hide_failures(client):
+    headers={'Host':'127.0.0.1:8765','Origin':'http://127.0.0.1:8765'}
+    response, data=request(client,'POST','/api/github/private/collect','{}',{**headers,'Origin':'https://evil.example'})
+    assert response.status==403 and json.loads(data)=={'error':'Invalid origin'}
+    response, data=request(client,'GET','/api/github/private/search?repository=a/b&q=xx',headers={'Host':'evil.example'})
+    assert response.status==403 and json.loads(data)=={'error':'Invalid host'}
+    for payload in ('', '{}', '[]', '{"repository":3}', '{bad', 'x'*4097):
+        response, data=request(client,'POST','/api/github/private/collect',payload,headers)
+        assert response.status==400 and json.loads(data)=={'error':'Private collection unavailable'}
+    for path,method,payload in [('/api/github/private/collect','POST','{"repository":"a/b"}'),('/api/github/private/search?repository=a/b&q=xx','GET',None)]:
+        for error,status,message in [(ValueError('secret'),400,'Private collection unavailable' if method=='POST' else 'Private search unavailable'),(OSError('secret'),502,'Unable to collect private data' if method=='POST' else 'Unable to search private data')]:
+            with patch('app.GITHUB_SESSIONS.use',side_effect=error):
+                response,data=request(client,method,path,payload,headers)
+            assert response.status==status and json.loads(data)=={'error':message} and b'secret' not in data
