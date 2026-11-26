@@ -89,3 +89,18 @@ jobs:
         run: pnpm --filter coa-infra exec jest test/services/mcp-stack.test.ts --runInBand --coverage=false
       - name: Test MCP gateway routing mutations
         run: python3 tests/coa_mcp_gateway_mutations.py coa-upstream
+      - name: Apply COA data-layer gateway patch
+        run: git -C coa-upstream apply "$GITHUB_WORKSPACE/patches/coa-v0.3.11-data-gateway.patch"
+      - name: Test COA data-layer gateway client
+        env:
+          PYTHONPATH: ${{ github.workspace }}/coa-upstream/packages/data-layer/src:${{ github.workspace }}/coa-upstream/packages/context-manager/src
+        run: |
+          uv run --no-sync --with 'pytest-asyncio>=0.23,<2' pytest -q \
+            coa-upstream/packages/data-layer/tests/unit/test_handler_validation.py \
+            coa-upstream/packages/data-layer/tests/unit/test_rest_deadline_ordering.py \
+            coa-upstream/packages/data-layer/tests/unit/test_contract_bounds.py
+      - name: Test COA data-layer stack synthesis
+        working-directory: coa-upstream
+        run: pnpm --filter coa-infra exec jest test/services/data-layer-stack.test.ts --runInBand --coverage=false
+      - name: Test data-layer gateway routing mutations
+        run: python3 tests/coa_data_gateway_mutations.py coa-upstream

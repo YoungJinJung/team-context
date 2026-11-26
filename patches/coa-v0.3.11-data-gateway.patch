@@ -1,0 +1,444 @@
+--- a/infra/lib/stacks/services/data-layer-stack.ts
++++ b/infra/lib/stacks/services/data-layer-stack.ts
+@@ -39,10 +39,19 @@
+ 
+     const { ssmPrefix } = resolveContext(this.node);
+ 
+-    const runtimeArn = ssm.StringParameter.valueForStringParameter(
+-      this,
+-      `${ssmPrefix}/serve/runtime-arn`,
+-    );
++    const region = cdk.Stack.of(this).region;
++    const account = cdk.Stack.of(this).account;
++    const gatewayArn = this.node.tryGetContext("team_context_gateway_arn");
++    const gatewayTarget = this.node.tryGetContext("team_context_gateway_target");
++    const gatewayMatch = typeof gatewayArn === "string"
++      ? /^arn:(aws|aws-cn|aws-us-gov):bedrock-agentcore:([a-z0-9-]+):([0-9]{12}):gateway\/((?:[0-9a-z]-?){1,100}-[0-9a-z]{10})$/.exec(gatewayArn)
++      : null;
++    if (!gatewayMatch || gatewayMatch[2] !== region || gatewayMatch[3] !== account ||
++        (gatewayMatch[1] === "aws-cn") !== region.startsWith("cn-") ||
++        (gatewayMatch[1] === "aws-us-gov") !== region.startsWith("us-gov-") ||
++        typeof gatewayTarget !== "string" || !/^(?:[0-9a-zA-Z]-?){1,100}$/.test(gatewayTarget)) {
++      throw new Error("Invalid Context Manager gateway configuration");
++    }
+ 
+     // Ontology-engine api-proxy Lambda ARN — data-layer's DescribeSchema
+     // proxies straight to it (the CM never sees the request). Same source
+@@ -76,7 +85,9 @@
+       vpcSubnets: { subnetType: ec2.SubnetType.PRIVATE_WITH_EGRESS },
+       securityGroups: [props.lambdaSecurityGroup],
+       environment: {
+-        AGENTCORE_RUNTIME_ARN: runtimeArn,
++        CM_GATEWAY_ARN: gatewayArn,
++        CM_GATEWAY_TARGET: gatewayTarget,
++        CM_GATEWAY_ACCOUNT: account,
+         ONTOLOGY_PROXY_LAMBDA_ARN: ontologyProxyLambdaArn,
+         ALLOWED_ORIGIN: props.allowedOrigin ?? "*",
+         // The REST contract accepts strategy=nl_to_sparql only with `-c graph_sources=on`.
+@@ -84,16 +95,6 @@
+       },
+     });
+ 
+-    // ── IAM: invoke AgentCore Runtime ─────────────────────────────
+-    // The actual invocation targets runtime/{id}/runtime-endpoint/{qualifier},
+-    // so we need a wildcard suffix on the runtime ARN.
+-    this.apiFn.addToRolePolicy(
+-      new iam.PolicyStatement({
+-        actions: ["bedrock-agentcore:InvokeAgentRuntime"],
+-        resources: [`${runtimeArn}`, `${runtimeArn}/*`],
+-      }),
+-    );
+-
+     // ── IAM: invoke the discovery Lambda direct-through (bypass CM) ──
+     // Schema queries hit the ontology-api-proxy. It is a pure read with no
+     // tier orchestration, so it skips the Context Manager entirely.
+--- a/infra/test/services/data-layer-stack.test.ts
++++ b/infra/test/services/data-layer-stack.test.ts
+@@ -23,6 +23,8 @@
+ const TEST_CONTEXT = {
+   resource_prefix: DEFAULT_RESOURCE_PREFIX,
+   env: DEFAULT_ENV,
++  team_context_gateway_arn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++  team_context_gateway_target: "ContextManager",
+   "aws:cdk:bundling-stacks": [],
+ };
+ 
+@@ -154,3 +156,43 @@
+     ).toBe(true);
+   });
+ });
++
++describe("DataLayerStack - gateway routing", () => {
++  function synth(gatewayArn: unknown, gatewayTarget: unknown): Template {
++    const app = new cdk.App({ context: { ...TEST_CONTEXT, team_context_gateway_arn: gatewayArn, team_context_gateway_target: gatewayTarget } });
++    const deps = new cdk.Stack(app, "GatewayDeps", { env: { account: "123456789012", region: "us-east-1" } });
++    const vpc = new ec2.Vpc(deps, "Vpc", { maxAzs: 2 });
++    return Template.fromStack(new DataLayerStack(app, "GatewayDataLayer", {
++      env: { account: "123456789012", region: "us-east-1" }, vpc,
++      lambdaSecurityGroup: new ec2.SecurityGroup(deps, "LambdaSg", { vpc }),
++    }));
++  }
++
++  it("uses the gateway and has no direct runtime invocation grant", () => {
++    const template = synth(TEST_CONTEXT.team_context_gateway_arn, "ContextManager");
++    template.hasResourceProperties("AWS::Lambda::Function", {
++      Environment: { Variables: Match.objectLike({
++        CM_GATEWAY_ARN: TEST_CONTEXT.team_context_gateway_arn,
++        CM_GATEWAY_TARGET: "ContextManager",
++        CM_GATEWAY_ACCOUNT: "123456789012",
++        AGENTCORE_RUNTIME_ARN: Match.absent(),
++      }) },
++    });
++    const statements = Object.values(template.findResources("AWS::IAM::Policy")).flatMap(
++      (p: any) => p.Properties.PolicyDocument.Statement,
++    );
++    const actions = statements.flatMap((s: any) => Array.isArray(s.Action) ? s.Action : [s.Action]);
++    expect(actions).not.toContain("bedrock-agentcore:InvokeAgentRuntime");
++  });
++
++  it.each([
++    [undefined, "ContextManager"],
++    ["arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/*", "ContextManager"],
++    ["arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/tc-0123456789", "ContextManager"],
++    ["arn:aws:bedrock-agentcore:us-east-1:999999999999:gateway/tc-0123456789", "ContextManager"],
++    [TEST_CONTEXT.team_context_gateway_arn, undefined],
++    [TEST_CONTEXT.team_context_gateway_arn, "../escape"],
++  ])("rejects unsafe gateway configuration: %s %s", (gatewayArn, target) => {
++    expect(() => synth(gatewayArn, target)).toThrow("Invalid Context Manager gateway configuration");
++  });
++});
+--- a/packages/data-layer/src/coa_data_layer/handler.py
++++ b/packages/data-layer/src/coa_data_layer/handler.py
+@@ -3,11 +3,13 @@
+ 
+ """Data Layer API Lambda handler — thin adapter between API Gateway and Context Manager.
+ 
+-Validates requests, invokes the Context Manager via AgentCore Runtime (HTTP POST
++Validates requests, invokes the Context Manager through AgentCore Gateway (HTTP POST
+ to the VPC endpoint with JWT bearer auth), and maps responses to Smithy output shapes.
+ 
+ Environment:
+-    AGENTCORE_RUNTIME_ARN: AgentCore Runtime ARN for the Context Manager.
++    CM_GATEWAY_ARN: AgentCore Gateway ARN for the Context Manager.
++    CM_GATEWAY_TARGET: Gateway runtime target name.
++    CM_GATEWAY_ACCOUNT: AWS account that owns the Gateway.
+     AWS_REGION: AWS region (used to construct the VPC endpoint hostname).
+ """
+ 
+@@ -18,6 +20,7 @@
+ import logging
+ import os
+ import queue
++import re
+ import threading
+ import time
+ from collections.abc import Callable
+@@ -25,7 +28,6 @@
+ from typing import Any, TypeGuard
+ from urllib import request as urllib_request
+ from urllib.error import HTTPError, URLError
+-from urllib.parse import quote
+ 
+ import boto3
+ from botocore.exceptions import BotoCoreError, ClientError
+@@ -43,18 +45,39 @@
+ 
+ logger = logging.getLogger(__name__)
+ 
+-RUNTIME_ARN = os.environ["AGENTCORE_RUNTIME_ARN"]
+ REGION = os.environ.get("AWS_REGION", "us-east-1")
+ 
++
++def _gateway_url(gateway_arn: str, target: str, account: str, region: str) -> str:
++    """Build only the configured, same-account AgentCore Gateway target URL."""
++    arn = re.fullmatch(
++        r"arn:(aws|aws-cn|aws-us-gov):bedrock-agentcore:([a-z0-9-]+):([0-9]{12}):gateway/((?:[0-9a-z]-?){1,100}-[0-9a-z]{10})",
++        gateway_arn,
++    ) if isinstance(gateway_arn, str) else None
++    valid_region = isinstance(region, str) and re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-[0-9]+", region)
++    valid_target = isinstance(target, str) and re.fullmatch(r"(?:[0-9a-zA-Z]-?){1,100}", target)
++    if not arn or not valid_region or not valid_target or arn.group(2) != region or arn.group(3) != account:
++        raise ValueError("Invalid Context Manager gateway configuration")
++    partition = arn.group(1)
++    if (partition == "aws-cn") != region.startswith("cn-") or (partition == "aws-us-gov") != region.startswith("us-gov-"):
++        raise ValueError("Invalid Context Manager gateway configuration")
++    suffix = "amazonaws.com.cn" if partition == "aws-cn" else "amazonaws.com"
++    return f"https://{arn.group(4)}.gateway.bedrock-agentcore.{region}.{suffix}/{target}/invocations"
++
++
++class _NoRedirect(urllib_request.HTTPRedirectHandler):
++    def redirect_request(self, req, fp, code, msg, headers, newurl):
++        return None
++
+ # Ontology-api-proxy Lambda that fronts the ontology-engine's FastAPI. The MCP
+ # ``describe_schema`` tool reads the same route, so a UI/data-layer caller and
+ # an MCP agent see the same schema — one source of truth for the queryable
+ # ontology.
+ ONTOLOGY_PROXY_LAMBDA_ARN = os.environ.get(ONTOLOGY_PROXY_LAMBDA_ARN_ENV, "")
+ 
+-AGENTCORE_ENDPOINT = f"https://bedrock-agentcore.{REGION}.amazonaws.com"
+-ENCODED_ARN = quote(RUNTIME_ARN, safe="")
+-INVOKE_URL = f"{AGENTCORE_ENDPOINT}/runtimes/{ENCODED_ARN}/invocations?qualifier=DEFAULT"
++INVOKE_URL = _gateway_url(
++    os.environ["CM_GATEWAY_ARN"], os.environ["CM_GATEWAY_TARGET"], os.environ["CM_GATEWAY_ACCOUNT"], REGION
++)
+ 
+ # Lambda client for the ontology-api-proxy invocation. Created lazily so that
+ # the handler still loads in test environments that don't stub boto3.
+@@ -148,7 +171,7 @@
+ def _post(req: urllib_request.Request, timeout_s: float, abandoned: threading.Event) -> bytes:
+     """POST ``req`` and return the body; an HTTP error's body is read here too, not by whoever catches it."""
+     try:
+-        with urllib_request.urlopen(req, timeout=timeout_s) as resp:
++        with urllib_request.build_opener(_NoRedirect()).open(req, timeout=timeout_s) as resp:
+             return _read_body(resp, abandoned)
+     except HTTPError as exc:
+         raise _buffered_http_error(exc, abandoned) from None
+@@ -201,7 +224,7 @@
+ 
+ 
+ def _invoke_context_manager(payload: dict, token: str) -> dict:
+-    """Invoke the Context Manager via AgentCore Runtime HTTP endpoint."""
++    """Invoke the Context Manager through the configured Gateway target."""
+     data = json.dumps(payload).encode("utf-8")
+     req = urllib_request.Request(
+         INVOKE_URL,
+--- a/packages/data-layer/tests/unit/test_handler_validation.py
++++ b/packages/data-layer/tests/unit/test_handler_validation.py
+@@ -19,7 +19,9 @@
+ with patch.dict(
+     "os.environ",
+     {
+-        "AGENTCORE_RUNTIME_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test",
++        "CM_GATEWAY_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++        "CM_GATEWAY_TARGET": "ContextManager",
++        "CM_GATEWAY_ACCOUNT": "123456789012",
+         "AWS_REGION": "us-east-1",
+         "ALLOWED_ORIGIN": "https://app.example.com",
+         "ONTOLOGY_PROXY_LAMBDA_ARN": "arn:aws:lambda:us-east-1:123456789012:function:test-ontology-proxy",
+@@ -151,7 +153,9 @@
+     def test_missing_allowed_origin_defaults_to_empty(self):
+         """Missing ALLOWED_ORIGIN defaults to empty string (doesn't crash at import)."""
+         env = {
+-            "AGENTCORE_RUNTIME_ARN": "arn:test",
++            "CM_GATEWAY_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++            "CM_GATEWAY_TARGET": "ContextManager",
++            "CM_GATEWAY_ACCOUNT": "123456789012",
+             "AWS_REGION": "us-east-1",
+             "ONTOLOGY_PROXY_LAMBDA_ARN": "arn:aws:lambda:us-east-1:123456789012:function:test-ontology-proxy",
+         }
+@@ -211,7 +215,7 @@
+             "sessionId": "sess-1",
+         }
+         with patch.object(handler_module, "urllib_request") as mock_req:
+-            mock_req.urlopen = _fake_urlopen(upstream)
++            mock_req.build_opener.return_value.open = _fake_urlopen(upstream)
+             event = _api_event("POST", "/namespaces/{namespaceId}/query", body={"query": "hello"})
+             result = handler(event, None)
+         assert result["statusCode"] == 200
+@@ -913,3 +917,78 @@
+         handler(_api_event("POST", "/namespaces/{namespaceId}/query", body={"query": "q"}), None)
+ 
+     assert "includeLlmUsage" not in captured["payload"]["options"]
++
++
++class TestContextManagerGateway:
++    def test_uses_gateway_url(self):
++        assert handler_module.INVOKE_URL == "https://tc-0123456789.gateway.bedrock-agentcore.us-east-1.amazonaws.com/ContextManager/invocations"
++
++    def test_request_forwards_user_token_only_to_gateway(self):
++        with patch.object(handler_module, "_read_within", return_value=b'{"result":{}}') as send:
++            handler_module._invoke_context_manager({"query": "test"}, "user-token")
++        req = send.call_args.args[0]
++        assert req.full_url == handler_module.INVOKE_URL
++        assert req.get_header("Authorization") == "Bearer user-token"
++        assert req.method == "POST"
++
++    @pytest.mark.parametrize("gateway,target,account,region", [
++        ("", "ContextManager", "123456789012", "us-east-1"),
++        ("arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/*", "ContextManager", "123456789012", "us-east-1"),
++        ("arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/tc-0123456789", "ContextManager", "123456789012", "us-east-1"),
++        ("arn:aws:bedrock-agentcore:us-east-1:999999999999:gateway/tc-0123456789", "ContextManager", "123456789012", "us-east-1"),
++        ("arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789", "../escape", "123456789012", "us-east-1"),
++        ("arn:aws:bedrock-agentcore:cn-north-1:123456789012:gateway/tc-0123456789", "ContextManager", "123456789012", "cn-north-1"),
++    ])
++    def test_invalid_config_fails_closed(self, gateway, target, account, region):
++        with pytest.raises(ValueError, match="Invalid Context Manager gateway configuration"):
++            handler_module._gateway_url(gateway, target, account, region)
++
++    def test_china_gateway_uses_china_domain(self):
++        assert handler_module._gateway_url(
++            "arn:aws-cn:bedrock-agentcore:cn-north-1:123456789012:gateway/tc-0123456789",
++            "ContextManager", "123456789012", "cn-north-1"
++        ) == "https://tc-0123456789.gateway.bedrock-agentcore.cn-north-1.amazonaws.com.cn/ContextManager/invocations"
++
++    def test_missing_gateway_never_falls_back_to_old_runtime(self):
++        import os
++        import subprocess
++        import sys
++
++        env = os.environ.copy()
++        env.pop("CM_GATEWAY_ARN", None)
++        env.update({"CM_GATEWAY_TARGET": "ContextManager", "CM_GATEWAY_ACCOUNT": "123456789012",
++                    "AWS_REGION": "us-east-1", "AGENTCORE_RUNTIME_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/old-0123456789"})
++        result = subprocess.run([sys.executable, "-c", "import coa_data_layer.handler"], env=env, capture_output=True, text=True)
++        assert result.returncode != 0
++        assert "CM_GATEWAY_ARN" in result.stderr
++
++    def test_redirect_never_forwards_the_bearer_token(self):
++        import threading
++        from http.server import BaseHTTPRequestHandler, HTTPServer
++        from urllib.request import Request
++
++        seen = []
++        class Redirect(BaseHTTPRequestHandler):
++            def do_GET(self):
++                seen.append((self.path, self.headers.get("Authorization")))
++                self.send_response(302 if self.path == "/start" else 200)
++                if self.path == "/start":
++                    self.send_header("Location", f"http://127.0.0.1:{self.server.server_port}/stolen")
++                self.send_header("Content-Length", "0")
++                self.end_headers()
++            def log_message(self, *args):
++                pass
++
++        server = HTTPServer(("127.0.0.1", 0), Redirect)
++        thread = threading.Thread(target=server.serve_forever, daemon=True)
++        thread.start()
++        try:
++            req = Request(f"http://127.0.0.1:{server.server_port}/start", headers={"Authorization": "Bearer fake-token"})
++            with pytest.raises(HTTPError) as error:
++                handler_module._post(req, 2, threading.Event())
++            assert error.value.code == 302
++            assert seen == [("/start", "Bearer fake-token")]
++        finally:
++            server.shutdown()
++            server.server_close()
++            thread.join()
+--- a/packages/data-layer/tests/unit/test_rest_deadline_ordering.py
++++ b/packages/data-layer/tests/unit/test_rest_deadline_ordering.py
+@@ -21,7 +21,9 @@
+ with patch.dict(
+     "os.environ",
+     {
+-        "AGENTCORE_RUNTIME_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test",
++        "CM_GATEWAY_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++        "CM_GATEWAY_TARGET": "ContextManager",
++        "CM_GATEWAY_ACCOUNT": "123456789012",
+         "AWS_REGION": "us-east-1",
+         "ALLOWED_ORIGIN": "https://app.example.com",
+         "ONTOLOGY_PROXY_LAMBDA_ARN": "arn:aws:lambda:us-east-1:123456789012:function:test-ontology-proxy",
+@@ -75,7 +77,7 @@
+     release = threading.Event()
+     try:
+         with patch.object(handler_module, "urllib_request") as mock_req:
+-            mock_req.urlopen = _urlopen_answering(release)
++            mock_req.build_opener.return_value.open = _urlopen_answering(release)
+             start = time.monotonic()
+             # 1.3 s of Lambda time left leaves the call 0.3 s.
+             result = handler(_api_event(), _lambda_context(1_300))
+@@ -103,10 +105,10 @@
+ def test_context_manager_call_budget(received_s_ago, context, expected_s):
+     """29 s from requestTimeEpoch (or handler entry) less 1 s, capped by the Lambda's time left less 1 s."""
+     with patch.object(handler_module, "urllib_request") as mock_req:
+-        mock_req.urlopen = _urlopen_answering()
++        mock_req.build_opener.return_value.open = _urlopen_answering()
+         handler(_api_event(received_s_ago=received_s_ago), context)
+ 
+-    assert expected_s - 0.5 < mock_req.urlopen.call_args.kwargs["timeout"] <= expected_s + 0.05
++    assert expected_s - 0.5 < mock_req.build_opener.return_value.open.call_args.kwargs["timeout"] <= expected_s + 0.05
+ 
+ 
+ @pytest.mark.parametrize(
+@@ -117,17 +119,17 @@
+ def test_context_manager_call_budget_starts_after_the_authorizer(authorizer_ms, expected_s):
+     """The gateway's 29 s integration timeout starts once the authorizer has returned; other latencies are ignored."""
+     with patch.object(handler_module, "urllib_request") as mock_req:
+-        mock_req.urlopen = _urlopen_answering()
++        mock_req.build_opener.return_value.open = _urlopen_answering()
+         handler(_api_event(received_s_ago=8.0, authorizer_ms=authorizer_ms), _lambda_context(30_000))
+ 
+-    assert expected_s - 0.5 < mock_req.urlopen.call_args.kwargs["timeout"] <= expected_s + 0.05
++    assert expected_s - 0.5 < mock_req.build_opener.return_value.open.call_args.kwargs["timeout"] <= expected_s + 0.05
+ 
+ 
+ def test_gateway_budget_already_spent_returns_rest_deadline_exceeded_without_calling():
+     with patch.object(handler_module, "urllib_request") as mock_req:
+         result = handler(_api_event(received_s_ago=28.0), _lambda_context(30_000))
+ 
+-    mock_req.urlopen.assert_not_called()
++    mock_req.build_opener.assert_not_called()
+     assert json.loads(result["body"])["error"] == "rest_deadline_exceeded"
+ 
+ 
+@@ -135,7 +137,7 @@
+     upstream = json.dumps({"error": "NoResultError", "message": "No result for the requested tier"}).encode("utf-8")
+     err = HTTPError("http://cm", 404, "Not Found", {}, io.BytesIO(upstream))
+     with patch.object(handler_module, "urllib_request") as mock_req:
+-        mock_req.urlopen = MagicMock(side_effect=err)
++        mock_req.build_opener.return_value.open = MagicMock(side_effect=err)
+         result = handler(_api_event(), _lambda_context(30_000))
+ 
+     assert result["statusCode"] == 404
+@@ -152,7 +154,7 @@
+ 
+     try:
+         with patch.object(handler_module, "urllib_request") as mock_req:
+-            mock_req.urlopen = MagicMock(side_effect=answer_late)
++            mock_req.build_opener.return_value.open = MagicMock(side_effect=answer_late)
+             result = handler(_api_event(), _lambda_context(1_300))
+             release.set()
+             deadline = time.monotonic() + 2.0
+@@ -184,7 +186,7 @@
+     resp.begin()
+     try:
+         with patch.object(handler_module, "urllib_request") as mock_req:
+-            mock_req.urlopen = MagicMock(return_value=resp)
++            mock_req.build_opener.return_value.open = MagicMock(return_value=resp)
+             result = handler(_api_event(), _lambda_context(1_500))
+             assert json.loads(result["body"])["error"] == "rest_deadline_exceeded"
+             deadline = time.monotonic() + 1.5
+@@ -236,7 +238,7 @@
+         threading.Thread(target=trickle, daemon=True).start()
+     try:
+         with patch.object(handler_module, "urllib_request") as mock_req:
+-            mock_req.urlopen = _urlopen_raising_http_error_over(client_sock)
++            mock_req.build_opener.return_value.open = _urlopen_raising_http_error_over(client_sock)
+             start = time.monotonic()
+             # 1.3 s of Lambda time left leaves the call 0.3 s.
+             result = handler(_api_event(), _lambda_context(1_300))
+@@ -257,7 +259,7 @@
+     server_sock.sendall(_error_head(len(upstream)) + upstream)
+     try:
+         with patch.object(handler_module, "urllib_request") as mock_req:
+-            mock_req.urlopen = _urlopen_raising_http_error_over(client_sock)
++            mock_req.build_opener.return_value.open = _urlopen_raising_http_error_over(client_sock)
+             result = handler(_api_event(), _lambda_context(30_000))
+     finally:
+         server_sock.close()
+--- a/packages/data-layer/tests/unit/test_api_contract_conformance.py
++++ b/packages/data-layer/tests/unit/test_api_contract_conformance.py
+@@ -36,7 +36,9 @@
+ with patch.dict(
+     "os.environ",
+     {
+-        "AGENTCORE_RUNTIME_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test",
++        "CM_GATEWAY_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++        "CM_GATEWAY_TARGET": "ContextManager",
++        "CM_GATEWAY_ACCOUNT": "123456789012",
+         "AWS_REGION": "us-east-1",
+         "ALLOWED_ORIGIN": "https://app.example.com",
+         "ONTOLOGY_PROXY_LAMBDA_ARN": "arn:aws:lambda:us-east-1:123456789012:function:test-ontology-proxy",
+--- a/packages/data-layer/tests/unit/test_contract_bounds.py
++++ b/packages/data-layer/tests/unit/test_contract_bounds.py
+@@ -27,7 +27,9 @@
+ with patch.dict(
+     "os.environ",
+     {
+-        "AGENTCORE_RUNTIME_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test",
++        "CM_GATEWAY_ARN": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++        "CM_GATEWAY_TARGET": "ContextManager",
++        "CM_GATEWAY_ACCOUNT": "123456789012",
+         "AWS_REGION": "us-east-1",
+         "ALLOWED_ORIGIN": "https://app.example.com",
+         "ONTOLOGY_PROXY_LAMBDA_ARN": "arn:aws:lambda:us-east-1:123456789012:function:test-ontology-proxy",
