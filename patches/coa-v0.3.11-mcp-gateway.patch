@@ -1,0 +1,368 @@
+--- a/infra/lib/stacks/services/mcp-stack.ts
++++ b/infra/lib/stacks/services/mcp-stack.ts
+@@ -39,7 +39,7 @@
+  *
+  * - Discovery tools (list_metrics, describe_schema) invoke backend Lambdas directly
+  * - Execution tools (query, translate, rag, graph) forward to Context Manager
+- *   via AgentCore invocations API (HTTP POST with JWT forwarding)
++ *   through an AgentCore Gateway target (HTTP POST with JWT forwarding)
+  */
+ export class McpStack extends SCLStack {
+   public readonly agentRuntimeArn: string;
+@@ -54,11 +54,18 @@
+ 
+     const runtimeName = this.prefixed("mcp-server").replace(/-/g, "_");
+ 
+-    // ── Resolve Context Manager Runtime ARN from SSM ──────────────────
+-    const cmRuntimeArn = ssm.StringParameter.valueForStringParameter(
+-      this,
+-      `${ssmPrefix}/serve/runtime-arn`,
+-    );
++    // Direct Context Manager invocation would bypass the gateway.
++    const gatewayArn = this.node.tryGetContext("team_context_gateway_arn");
++    const gatewayTarget = this.node.tryGetContext("team_context_gateway_target");
++    const gatewayMatch = typeof gatewayArn === "string"
++      ? /^arn:(aws|aws-cn|aws-us-gov):bedrock-agentcore:([a-z0-9-]+):([0-9]{12}):gateway\/((?:[0-9a-z]-?){1,100}-[0-9a-z]{10})$/.exec(gatewayArn)
++      : null;
++    if (!gatewayMatch || gatewayMatch[2] !== region || gatewayMatch[3] !== account ||
++        (gatewayMatch[1] === "aws-cn") !== region.startsWith("cn-") ||
++        (gatewayMatch[1] === "aws-us-gov") !== region.startsWith("us-gov-") ||
++        typeof gatewayTarget !== "string" || !/^(?:[0-9a-zA-Z]-?){1,100}$/.test(gatewayTarget)) {
++      throw new Error("Invalid Context Manager gateway configuration");
++    }
+ 
+     // IdP issuer and MCP client ID via SSM (avoids a cross-stack export on the
+     // auth stack's UserPool/McpClient — see idp-authentication-stack.ts for the
+@@ -180,8 +187,10 @@
+         ROLES_TABLE_NAME: props.rolesTable.tableName,
+         RRM_TABLE_NAME: props.resourceRoleMappingsTable.tableName,
+         GROUP_CLAIM_NAME: groupClaimName,
+-        // Execution tools forward to Context Manager via HTTP
+-        CM_RUNTIME_ARN: cmRuntimeArn,
++        // Execution tools forward the caller's JWT through the gateway.
++        CM_GATEWAY_ARN: gatewayArn,
++        CM_GATEWAY_TARGET: gatewayTarget,
++        CM_GATEWAY_ACCOUNT: account,
+         // Discovery tools invoke backend Lambdas directly
+         METRIC_SERVICE_LAMBDA_ARN: metricServiceLambdaArn,
+         ONTOLOGY_PROXY_LAMBDA_ARN: ontologyProxyLambdaArn,
+@@ -232,17 +241,6 @@
+       }),
+     );
+ 
+-    // Invoke Context Manager via AgentCore invocations API
+-    runtime.addToRolePolicy(
+-      new iam.PolicyStatement({
+-        actions: [
+-          "bedrock-agentcore:InvokeAgentRuntime",
+-          "bedrock-agentcore:InvokeAgentRuntimeForUser",
+-        ],
+-        resources: [`arn:aws:bedrock-agentcore:${region}:${account}:runtime/*`],
+-      }),
+-    );
+-
+     // Invoke backend Lambdas directly (discovery tools)
+     runtime.addToRolePolicy(
+       new iam.PolicyStatement({
+--- a/infra/test/services/mcp-stack.test.ts
++++ b/infra/test/services/mcp-stack.test.ts
+@@ -17,6 +17,8 @@
+ const TEST_CONTEXT = {
+   resource_prefix: DEFAULT_RESOURCE_PREFIX,
+   env: DEFAULT_ENV,
++  team_context_gateway_arn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++  team_context_gateway_target: "ContextManager",
+   context_manager_image_uri:
+     "123456789012.dkr.ecr.us-east-1.amazonaws.com/coa-dev:latest",
+   "aws:cdk:bundling-stacks": [],
+@@ -101,7 +103,9 @@
+         EnvironmentVariables: Match.objectLike({
+           ROLES_TABLE_NAME: Match.anyValue(),
+           RRM_TABLE_NAME: Match.anyValue(),
+-          CM_RUNTIME_ARN: Match.anyValue(),
++          CM_GATEWAY_ARN: TEST_CONTEXT.team_context_gateway_arn,
++          CM_GATEWAY_TARGET: "ContextManager",
++          CM_GATEWAY_ACCOUNT: "123456789012",
+           SCL_MCP_MODE: "true",
+         }),
+       }),
+@@ -247,19 +251,17 @@
+     expect(neptuneActions).toEqual([]);
+   });
+ 
+-  it("grants InvokeAgentRuntime for CM delegation", () => {
+-    template.hasResourceProperties("AWS::IAM::Policy", {
+-      PolicyDocument: {
+-        Statement: Match.arrayWith([
+-          Match.objectLike({
+-            Effect: "Allow",
+-            Action: Match.arrayWith(["bedrock-agentcore:InvokeAgentRuntime"]),
+-          }),
+-        ]),
+-      },
+-    });
++  it("does not grant direct runtime invocation", () => {
++    const policies = template.findResources("AWS::IAM::Policy");
++    const statements = Object.values(policies).flatMap(
++      (p: any) => p.Properties.PolicyDocument.Statement,
++    );
++    const actions = statements.flatMap((s: any) => Array.isArray(s.Action) ? s.Action : [s.Action]);
++    expect(actions).not.toContain("bedrock-agentcore:InvokeAgentRuntime");
++    expect(actions).not.toContain("bedrock-agentcore:InvokeAgentRuntimeForUser");
+   });
+ 
++
+   it("grants DynamoDB read for roles/RRM only", () => {
+     template.hasResourceProperties("AWS::IAM::Policy", {
+       PolicyDocument: {
+@@ -395,3 +397,40 @@
+     });
+   });
+ });
++
++describe("McpStack - gateway routing", () => {
++  function synth(gatewayArn: unknown, gatewayTarget: unknown): Template {
++    const app = new cdk.App({ context: { ...TEST_CONTEXT, team_context_gateway_arn: gatewayArn, team_context_gateway_target: gatewayTarget } });
++    const deps = new cdk.Stack(app, "RouteDeps", { env: { account: "123456789012", region: "us-east-1" } });
++    const vpc = new ec2.Vpc(deps, "Vpc", { maxAzs: 2 });
++    const table = (name: string) => new dynamodb.Table(deps, name, { partitionKey: { name: "PK", type: dynamodb.AttributeType.STRING } });
++    return Template.fromStack(new McpStack(app, "RouteMcp", {
++      env: { account: "123456789012", region: "us-east-1" }, vpc,
++      rolesTable: table("Roles"), resourceRoleMappingsTable: table("RRM"),
++    }));
++  }
++
++  it("routes execution through the configured gateway without a direct runtime ARN", () => {
++    const template = synth(TEST_CONTEXT.team_context_gateway_arn, "ContextManager");
++    template.hasResourceProperties("AWS::BedrockAgentCore::Runtime", {
++      EnvironmentVariables: Match.objectLike({
++        CM_GATEWAY_ARN: TEST_CONTEXT.team_context_gateway_arn,
++        CM_GATEWAY_TARGET: "ContextManager",
++        CM_GATEWAY_ACCOUNT: "123456789012",
++        CM_RUNTIME_ARN: Match.absent(),
++      }),
++    });
++  });
++
++  it.each([
++    [undefined, "ContextManager"],
++    ["arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/*", "ContextManager"],
++    ["arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/tc-0123456789", "ContextManager"],
++    ["arn:aws:bedrock-agentcore:us-east-1:999999999999:gateway/tc-0123456789", "ContextManager"],
++    ["arn:aws-cn:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789", "ContextManager"],
++    [TEST_CONTEXT.team_context_gateway_arn, undefined],
++    [TEST_CONTEXT.team_context_gateway_arn, "../escape"],
++  ])("rejects unsafe gateway configuration: %s %s", (gatewayArn, target) => {
++    expect(() => synth(gatewayArn, target)).toThrow("Invalid Context Manager gateway configuration");
++  });
++});
+--- a/packages/mcp-server/src/coa_mcp/clients/context_manager.py
++++ b/packages/mcp-server/src/coa_mcp/clients/context_manager.py
+@@ -1,11 +1,11 @@
+ # Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ # SPDX-License-Identifier: Apache-2.0
+ 
+-"""HTTP client for invoking the Context Manager AgentCore Runtime.
++"""HTTP client for invoking the Context Manager through AgentCore Gateway.
+ 
+ The MCP server is a thin protocol adapter. Execution tools (query,
+ translate_sparql, rag_retrieval, graph_traversal) delegate to the Context
+-Manager via its AgentCore invocations endpoint. This avoids duplicating
++Manager via an authenticated AgentCore Gateway target. This avoids duplicating
+ DB/Neptune/OpenSearch/Bedrock access in the MCP runtime.
+ 
+ Runtime session affinity: AgentCore starts a new runtime session (fresh microVM, cold start plus the CM's
+@@ -20,7 +20,7 @@
+ import hashlib
+ import json
+ import os
+-from urllib.parse import quote
++import re
+ 
+ import httpx
+ import structlog
+@@ -81,16 +81,26 @@
+ class ContextManagerClient:
+     """Async HTTP client for invoking the Context Manager via AgentCore."""
+ 
+-    def __init__(self, runtime_arn: str, region: str):
+-        """Initialize the client and build the AgentCore invocation URL."""
+-        encoded_arn = quote(runtime_arn, safe="")
+-        self._url = (
+-            f"https://bedrock-agentcore.{region}.amazonaws.com/runtimes/{encoded_arn}/invocations?qualifier=DEFAULT"
+-        )
++    def __init__(self, gateway_arn: str, target: str, account: str, region: str):
++        """Use only the configured, same-account Gateway runtime target."""
++        arn = re.fullmatch(
++            r"arn:(aws|aws-cn|aws-us-gov):bedrock-agentcore:([a-z0-9-]+):([0-9]{12}):gateway/((?:[0-9a-z]-?){1,100}-[0-9a-z]{10})",
++            gateway_arn,
++        ) if isinstance(gateway_arn, str) else None
++        valid_region = isinstance(region, str) and re.fullmatch(r"[a-z]{2}(?:-gov)?-[a-z]+-[0-9]+", region)
++        valid_target = isinstance(target, str) and re.fullmatch(r"(?:[0-9a-zA-Z]-?){1,100}", target)
++        if not arn or not valid_region or not valid_target or arn.group(2) != region or arn.group(3) != account:
++            raise ValueError("Invalid Context Manager gateway configuration")
++        partition = arn.group(1)
++        if (partition == "aws-cn") != region.startswith("cn-") or (partition == "aws-us-gov") != region.startswith("us-gov-"):
++            raise ValueError("Invalid Context Manager gateway configuration")
++        suffix = "amazonaws.com.cn" if partition == "aws-cn" else "amazonaws.com"
++        self._url = f"https://{arn.group(4)}.gateway.bedrock-agentcore.{region}.{suffix}/{target}/invocations"
+         # Fast connect timeout, long read budget (the CM does full tiered
+         # resolution). No retry here: the CM retries its own dependencies, so
+         # retrying the whole invocation would stack retries across layers.
+         self._client = httpx.AsyncClient(
++            follow_redirects=False,
+             timeout=httpx.Timeout(
+                 connect=2.0,
+                 read=_INVOKE_TIMEOUT_S,
+@@ -100,7 +110,7 @@
+         )
+         logger.info(
+             "cm_client_initialized",
+-            runtime_arn=runtime_arn,
++            gateway_arn=gateway_arn,
+             region=region,
+         )
+ 
+--- a/packages/mcp-server/src/coa_mcp/server.py
++++ b/packages/mcp-server/src/coa_mcp/server.py
+@@ -60,19 +60,15 @@
+ 
+ 
+ def _get_cm_client() -> ContextManagerClient:
+-    """Lazy-init the Context Manager HTTP client for execution tools.
+-
+-    Resolves the CM runtime ARN from the CM_RUNTIME_ARN env var (set by CDK
+-    from SSM at deploy time).
+-    """
++    """Use the configured gateway; never fall back to direct runtime access."""
+     global _cm_client
+     if _cm_client is None:
+-        cm_arn = os.environ.get("CM_RUNTIME_ARN", "")
+-        if not cm_arn:
+-            raise RuntimeError(
+-                "CM_RUNTIME_ARN env var not set. The MCP stack must pass the Context Manager runtime ARN."
+-            )
+-        _cm_client = ContextManagerClient(runtime_arn=cm_arn, region=config.aws_region)
++        gateway = os.environ.get("CM_GATEWAY_ARN", "")
++        target = os.environ.get("CM_GATEWAY_TARGET", "")
++        account = os.environ.get("CM_GATEWAY_ACCOUNT", "")
++        if not gateway or not target or not account:
++            raise RuntimeError("Context Manager gateway configuration is missing")
++        _cm_client = ContextManagerClient(gateway_arn=gateway, target=target, account=account, region=config.aws_region)
+     return _cm_client
+ 
+ 
+--- a/packages/mcp-server/tests/unit/test_context_manager.py
++++ b/packages/mcp-server/tests/unit/test_context_manager.py
+@@ -27,7 +27,8 @@
+ def _make_client() -> ContextManagerClient:
+     """Build a client; the SSE layer is mocked per test."""
+     return ContextManagerClient(
+-        runtime_arn="arn:aws:bedrock-agentcore:us-east-1:123:runtime/cm-abc",
++        gateway_arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++        target="ContextManager", account="123456789012",
+         region="us-east-1",
+     )
+ 
+@@ -66,17 +67,35 @@
+ 
+ @pytest.mark.unit
+ class TestContextManagerClientInit:
+-    def test_url_includes_encoded_arn_and_region(self):
++    def test_url_targets_only_configured_gateway(self):
++        client = _make_client()
++        assert client._url == "https://tc-0123456789.gateway.bedrock-agentcore.us-east-1.amazonaws.com/ContextManager/invocations"
++
++    def test_gateway_client_never_follows_redirects(self):
++        assert _make_client()._client.follow_redirects is False
++
++    def test_china_gateway_uses_china_dns_suffix(self):
+         client = ContextManagerClient(
+-            runtime_arn="arn:aws:bedrock-agentcore:eu-west-1:1:runtime/cm",
+-            region="eu-west-1",
++            gateway_arn="arn:aws-cn:bedrock-agentcore:cn-north-1:123456789012:gateway/tc-0123456789",
++            target="ContextManager", account="123456789012", region="cn-north-1",
+         )
+-        assert "bedrock-agentcore.eu-west-1.amazonaws.com" in client._url
+-        # The ARN colons/slashes must be percent-encoded into the path segment.
+-        assert "arn%3Aaws%3Abedrock-agentcore" in client._url
+-        assert client._url.endswith("/invocations?qualifier=DEFAULT")
++        assert client._url == "https://tc-0123456789.gateway.bedrock-agentcore.cn-north-1.amazonaws.com.cn/ContextManager/invocations"
+ 
++    @pytest.mark.parametrize("gateway,target,account,region", [
++        ("", "ContextManager", "123456789012", "us-east-1"),
++        ("arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/*", "ContextManager", "123456789012", "us-east-1"),
++        ("arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/tc-0123456789", "ContextManager", "123456789012", "us-east-1"),
++        ("arn:aws:bedrock-agentcore:us-east-1:999999999999:gateway/tc-0123456789", "ContextManager", "123456789012", "us-east-1"),
++        ("arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789", "../other", "123456789012", "us-east-1"),
++        ("arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789", "https://attacker", "123456789012", "us-east-1"),
++        ("arn:aws:bedrock-agentcore:cn-north-1:123456789012:gateway/tc-0123456789", "ContextManager", "123456789012", "cn-north-1"),
++    ])
++    def test_invalid_configuration_fails_closed(self, gateway, target, account, region):
++        with pytest.raises(ValueError, match="Invalid Context Manager gateway configuration"):
++            ContextManagerClient(gateway_arn=gateway, target=target, account=account, region=region)
+ 
++
++
+ @pytest.mark.unit
+ class TestContextManagerInvoke:
+     @pytest.mark.asyncio
+--- a/packages/mcp-server/tests/unit/test_context_manager_timeout.py
++++ b/packages/mcp-server/tests/unit/test_context_manager_timeout.py
+@@ -15,7 +15,8 @@
+     from coa_mcp.clients import context_manager as cm
+ 
+     client = cm.ContextManagerClient(
+-        runtime_arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/abc",
++        gateway_arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++        target="ContextManager", account="123456789012",
+         region="us-east-1",
+     )
+     assert isinstance(client._client.timeout, httpx.Timeout)
+--- a/packages/mcp-server/tests/unit/test_server.py
++++ b/packages/mcp-server/tests/unit/test_server.py
+@@ -209,23 +209,28 @@
+         assert created == [server.config.aws_region]
+ 
+     def test_cm_client_missing_arn_raises(self, monkeypatch):
+-        monkeypatch.delenv("CM_RUNTIME_ARN", raising=False)
+-        with pytest.raises(RuntimeError, match="CM_RUNTIME_ARN"):
++        monkeypatch.delenv("CM_GATEWAY_ARN", raising=False)
++        monkeypatch.setenv("CM_GATEWAY_TARGET", "ContextManager")
++        monkeypatch.setenv("CM_GATEWAY_ACCOUNT", "123456789012")
++        monkeypatch.setenv("CM_RUNTIME_ARN", "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/old-0123456789")
++        with pytest.raises(RuntimeError, match="gateway configuration"):
+             server._get_cm_client()
+ 
+     def test_cm_client_is_cached(self, monkeypatch):
+-        monkeypatch.setenv("CM_RUNTIME_ARN", "arn:aws:bedrock-agentcore:us-east-1:1:runtime/cm")
++        monkeypatch.setenv("CM_GATEWAY_ARN", "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789")
++        monkeypatch.setenv("CM_GATEWAY_TARGET", "ContextManager")
++        monkeypatch.setenv("CM_GATEWAY_ACCOUNT", "123456789012")
+         created: list[dict] = []
+ 
+-        def fake_ctor(runtime_arn, region):
+-            created.append({"arn": runtime_arn, "region": region})
++        def fake_ctor(gateway_arn, target, account, region):
++            created.append({"arn": gateway_arn, "target": target, "account": account, "region": region})
+             return object()
+ 
+         monkeypatch.setattr(server, "ContextManagerClient", fake_ctor)
+         first = server._get_cm_client()
+         second = server._get_cm_client()
+         assert first is second
+-        assert len(created) == 1
++        assert created == [{"arn": "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789", "target": "ContextManager", "account": "123456789012", "region": server.config.aws_region}]
+ 
+ 
+ @pytest.fixture
+@@ -990,7 +995,8 @@
+ 
+         monkeypatch.setattr(context_manager.asyncio, "sleep", AsyncMock())
+         client = context_manager.ContextManagerClient(
+-            runtime_arn="arn:aws:bedrock-agentcore:us-east-1:123:runtime/cm-abc", region="us-east-1"
++            gateway_arn="arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++            target="ContextManager", account="123456789012", region="us-east-1"
+         )
+         monkeypatch.setattr(server, "_get_cm_client", lambda: client)
+         return client
