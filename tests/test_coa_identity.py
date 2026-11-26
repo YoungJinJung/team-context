@@ -177,3 +177,14 @@ def test_configuration_errors_are_safe_and_actionable():
         CoaIdentity('https://evil.example/private',AUD,'us-east-1',SCOPE,'cognito',True)
     with pytest.raises(ValueError,match='^Invalid issuer$'):
         CoaIdentity('https://login.microsoftonline.com/bad/v2.0',AUD,'us-east-1',SCOPE,'entra',True)
+
+
+def test_cognito_access_token_rejects_unexpected_client_even_with_matching_audience(private_key):
+    now = int(time.time())
+    payload = {'iss': COGNITO, 'sub': 'cognito-user', 'aud': AUD, 'client_id': 'other-client',
+               'token_use': 'access', 'username': 'user', 'scope': SCOPE, 'iat': now - 5, 'exp': now + 300}
+    assert verify(configured(COGNITO, 'cognito'), private_key, payload) is None
+    assert verify(configured(COGNITO, 'cognito'), private_key, {**payload, 'client_id': AUD}) == Principal(COGNITO, 'cognito-user')
+    del payload['client_id']
+    assert verify(configured(COGNITO, 'cognito'), private_key, payload) is None
+    assert verify(configured(COGNITO, 'cognito'), private_key, {**payload, 'client_id': AUD, 'aud': 'https://resource.example'}) is None
