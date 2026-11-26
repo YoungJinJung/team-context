@@ -1,0 +1,712 @@
+--- a/infra/lib/stacks/services/data-layer-stack.ts
++++ b/infra/lib/stacks/services/data-layer-stack.ts
+@@ -7,7 +7,6 @@
+  */
+ import * as cdk from "aws-cdk-lib";
+ import * as ec2 from "aws-cdk-lib/aws-ec2";
+-import * as iam from "aws-cdk-lib/aws-iam";
+ import * as lambda from "aws-cdk-lib/aws-lambda";
+ import * as ssm from "aws-cdk-lib/aws-ssm";
+ import { Construct } from "constructs";
+@@ -53,15 +52,6 @@
+       throw new Error("Invalid Context Manager gateway configuration");
+     }
+ 
+-    // Ontology-engine api-proxy Lambda ARN — data-layer's DescribeSchema
+-    // proxies straight to it (the CM never sees the request). Same source
+-    // MCP's discovery.describe_schema uses, so both surfaces converge on
+-    // one backend endpoint (``/namespaces/{namespaceId}/schema``).
+-    const ontologyProxyLambdaArn = ssm.StringParameter.valueForStringParameter(
+-      this,
+-      `${ssmPrefix}/ontology-engine/api-fn-arn`,
+-    );
+-
+     // ── Lambda code bundle ─────────────────────────────────────────
+     // The handler imports from ``coa_common`` (constants + smithy_shapes).
+     // Importing any ``coa_common`` submodule runs its package ``__init__``,
+@@ -88,23 +78,12 @@
+         CM_GATEWAY_ARN: gatewayArn,
+         CM_GATEWAY_TARGET: gatewayTarget,
+         CM_GATEWAY_ACCOUNT: account,
+-        ONTOLOGY_PROXY_LAMBDA_ARN: ontologyProxyLambdaArn,
+         ALLOWED_ORIGIN: props.allowedOrigin ?? "*",
+         // The REST contract accepts strategy=nl_to_sparql only with `-c graph_sources=on`.
+         ...(graphSourcesEnabled(this.node) && { [GRAPH_SOURCES_ENV]: "true" }),
+       },
+     });
+ 
+-    // ── IAM: invoke the discovery Lambda direct-through (bypass CM) ──
+-    // Schema queries hit the ontology-api-proxy. It is a pure read with no
+-    // tier orchestration, so it skips the Context Manager entirely.
+-    this.apiFn.addToRolePolicy(
+-      new iam.PolicyStatement({
+-        actions: ["lambda:InvokeFunction"],
+-        resources: [ontologyProxyLambdaArn],
+-      }),
+-    );
+-
+     // ── Publish Lambda ARN to SSM ──────────────────────────────────
+     new ssm.StringParameter(this, "SsmDataLayerApiFnArn", {
+       parameterName: `${ssmPrefix}/data-layer/api-fn-arn`,
+--- a/infra/lib/stacks/services/mcp-stack.ts
++++ b/infra/lib/stacks/services/mcp-stack.ts
+@@ -20,7 +20,6 @@
+ import { parseEcrImageUri } from "../../utils/ecr-utils";
+ import { Paths } from "../../paths";
+ import { METRIC_API_FUNCTION_NAME } from "./metric-service-stack";
+-import { ONTOLOGY_API_PROXY_FUNCTION_NAME } from "./ontology-stack";
+ import { SCLStack } from "../../constructs";
+ 
+ export interface McpStackProps extends cdk.StackProps {
+@@ -94,11 +93,8 @@
+       this,
+       METRIC_API_FUNCTION_NAME,
+     );
+-    const ontologyProxyLambdaArn = prefixedLambdaArn(
+-      this,
+-      ONTOLOGY_API_PROXY_FUNCTION_NAME,
+-    );
+ 
++
+     // ── Security Group (minimal: HTTPS only) ──────────────────────────
+     const mcpSg = new ec2.SecurityGroup(this, "McpSG", {
+       vpc: props.vpc,
+@@ -193,7 +189,6 @@
+         CM_GATEWAY_ACCOUNT: account,
+         // Discovery tools invoke backend Lambdas directly
+         METRIC_SERVICE_LAMBDA_ARN: metricServiceLambdaArn,
+-        ONTOLOGY_PROXY_LAMBDA_ARN: ontologyProxyLambdaArn,
+         // Override entrypoint to run MCP server instead of Context Manager
+         SCL_MCP_MODE: "true",
+         // The default, stated so the template shows it. "false" is a local-dev
+@@ -245,7 +240,7 @@
+     runtime.addToRolePolicy(
+       new iam.PolicyStatement({
+         actions: ["lambda:InvokeFunction"],
+-        resources: [metricServiceLambdaArn, ontologyProxyLambdaArn],
++        resources: [metricServiceLambdaArn],
+       }),
+     );
+ 
+--- a/infra/test/services/data-layer-stack.test.ts
++++ b/infra/test/services/data-layer-stack.test.ts
+@@ -28,14 +28,6 @@
+   "aws:cdk:bundling-stacks": [],
+ };
+ 
+-// The DescribeSchema and ListMetrics handlers invoke backend Lambdas directly
+-// (bypassing the Context Manager). That direct-invoke path only works if the
+-// Lambda is wired up two ways:
+-//   1. Both backend ARNs must reach it as environment variables so the Python
+-//      handler can dispatch to the correct FunctionName.
+-//   2. Its execution role must hold ``lambda:InvokeFunction`` on both ARNs;
+-//      otherwise the invoke returns 502.
+-// These assertions pin both; dropping either would silently break discovery.
+ describe("DataLayerStack", () => {
+   let template: Template;
+ 
+@@ -77,36 +69,19 @@
+     }
+   });
+ 
+-  it("wires the ontology-proxy Lambda ARN into the API Lambda env", () => {
+-    template.hasResourceProperties(
+-      "AWS::Lambda::Function",
+-      Match.objectLike({
+-        Environment: {
+-          Variables: Match.objectLike({
+-            ONTOLOGY_PROXY_LAMBDA_ARN: Match.anyValue(),
+-          }),
+-        },
+-      }),
+-    );
+-  });
+-
+-  it("grants lambda:InvokeFunction only on the ontology-proxy ARN", () => {
+-    // DescribeSchema is the only direct-through discovery handler left, so the
+-    // invoke grant must target exactly one ARN. The metric catalog is served by
+-    // the metric-service Lambda via its own API Gateway route (control-plane's
+-    // ListMetrics), so a second target here would be unused privilege.
++  it("does not grant the disabled schema backend Lambda access", () => {
++    const templateText = JSON.stringify(template.toJSON());
++    expect(templateText).not.toContain("ONTOLOGY_PROXY_LAMBDA_ARN");
+     const policies = template.findResources("AWS::IAM::Policy");
+-    const invokeStatements = Object.values(policies)
++    const actions = Object.values(policies)
+       .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
+-      .filter((s: any) => {
+-        const actions = Array.isArray(s.Action) ? s.Action : [s.Action];
+-        return actions.includes("lambda:InvokeFunction");
+-      });
+-    expect(invokeStatements.length).toBeGreaterThanOrEqual(1);
+-    const targets = invokeStatements.flatMap((s: any) =>
+-      Array.isArray(s.Resource) ? s.Resource : [s.Resource],
+-    );
+-    expect(targets.length).toBe(1);
++      .flatMap((s: any) => Array.isArray(s.Action) ? s.Action : [s.Action]);
++    expect(actions).not.toContain("*");
++    expect(actions).not.toContain("lambda:*");
++    const invokes = Object.values(policies)
++      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
++      .filter((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]).includes("lambda:InvokeFunction"));
++    expect(invokes).toEqual([]);
+   });
+ 
+   it("publishes the API Lambda ARN via SSM for the ApiStack to import", () => {
+--- a/infra/test/services/mcp-stack.test.ts
++++ b/infra/test/services/mcp-stack.test.ts
+@@ -346,11 +346,25 @@
+     const runtime = JSON.stringify(
+       template.findResources("AWS::BedrockAgentCore::Runtime"),
+     );
+-    for (const fn of ["metric-api", "ontology-api-proxy"]) {
++    for (const fn of ["metric-api"]) {
+       expect(runtime).toContain(
+         `:lambda:us-east-1:123456789012:function:${DEFAULT_RESOURCE_PREFIX}-${DEFAULT_ENV}-${fn}`,
+       );
+     }
++    expect(runtime).not.toContain("ONTOLOGY_PROXY_LAMBDA_ARN");
++    const policies = template.findResources("AWS::IAM::Policy");
++    const actions = Object.values(policies)
++      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
++      .flatMap((s: any) => Array.isArray(s.Action) ? s.Action : [s.Action]);
++    expect(actions).not.toContain("*");
++    expect(actions).not.toContain("lambda:*");
++    const invokes = Object.values(policies)
++      .flatMap((p: any) => p.Properties.PolicyDocument.Statement)
++      .filter((s: any) => (Array.isArray(s.Action) ? s.Action : [s.Action]).includes("lambda:InvokeFunction"));
++    expect(invokes).toHaveLength(1);
++    expect(JSON.stringify(invokes)).toContain("metric-api");
++    expect(JSON.stringify(invokes)).not.toContain("ontology-api-proxy");
++    expect(invokes[0].Resource).not.toContain("*");
+     // The partition comes from the stack, so GovCloud/China ARNs stay valid.
+     expect(runtime).toContain("AWS::Partition");
+     const params = JSON.stringify(template.toJSON().Parameters ?? {});
+--- a/packages/data-layer/src/coa_data_layer/handler.py
++++ b/packages/data-layer/src/coa_data_layer/handler.py
+@@ -29,11 +29,7 @@
+ from urllib import request as urllib_request
+ from urllib.error import HTTPError, URLError
+ 
+-import boto3
+-from botocore.exceptions import BotoCoreError, ClientError
+ from coa_common.constants import (
+-    DESCRIBE_SCHEMA_RESOURCE,
+-    ONTOLOGY_PROXY_LAMBDA_ARN_ENV,
+     QUERY_STRATEGIES,
+     validate_namespace_id,
+     validate_query_text,
+@@ -69,28 +65,10 @@
+     def redirect_request(self, req, fp, code, msg, headers, newurl):
+         return None
+ 
+-# Ontology-api-proxy Lambda that fronts the ontology-engine's FastAPI. The MCP
+-# ``describe_schema`` tool reads the same route, so a UI/data-layer caller and
+-# an MCP agent see the same schema — one source of truth for the queryable
+-# ontology.
+-ONTOLOGY_PROXY_LAMBDA_ARN = os.environ.get(ONTOLOGY_PROXY_LAMBDA_ARN_ENV, "")
+-
+ INVOKE_URL = _gateway_url(
+     os.environ["CM_GATEWAY_ARN"], os.environ["CM_GATEWAY_TARGET"], os.environ["CM_GATEWAY_ACCOUNT"], REGION
+ )
+-
+-# Lambda client for the ontology-api-proxy invocation. Created lazily so that
+-# the handler still loads in test environments that don't stub boto3.
+-_lambda_client = None
+-
+-
+-def _get_lambda_client():
+-    global _lambda_client
+-    if _lambda_client is None:
+-        _lambda_client = boto3.client("lambda", region_name=REGION)
+-    return _lambda_client
+ 
+-
+ _ALLOWED_ORIGIN = os.environ.get("ALLOWED_ORIGIN", "")
+ 
+ CORS_HEADERS = {
+@@ -438,32 +416,6 @@
+         if relationship_filter:
+             options["relationshipFilter"] = relationship_filter
+     return options
+-
+-
+-def _parse_describe_schema_query(query: dict) -> dict[str, str]:
+-    """Validate the ``DescribeSchema`` query string and return it in canonical form.
+-
+-    Query-string values always arrive as strings, so the booleans and integers
+-    are parsed here. The camelCase (Smithy wire) names are kept: the
+-    ontology-api-proxy's per-path alias table renames them for FastAPI.
+-    """
+-    forwarded: dict[str, str] = {}
+-    include_properties = query.get("includeProperties")
+-    if include_properties is not None:
+-        forwarded["includeProperties"] = str(
+-            contract.require_query_bool(include_properties, "includeProperties")
+-        ).lower()
+-    max_results = query.get("maxResults")
+-    if max_results is not None:
+-        forwarded["maxResults"] = str(
+-            contract.require_query_int(
+-                max_results,
+-                "maxResults",
+-                contract.DESCRIBE_SCHEMA_MAX_RESULTS_MIN,
+-                contract.DESCRIBE_SCHEMA_MAX_RESULTS_MAX,
+-            )
+-        )
+-    return forwarded
+ 
+ 
+ def _handle_query(namespace: str, event: dict) -> dict:
+@@ -597,86 +549,10 @@
+ 
+ 
+ def _handle_describe_schema(namespace: str, event: dict) -> dict:
+-    """Describe the namespace's queryable schema.
+-
+-    Proxies to the ontology-api-proxy Lambda's ``/graph/schema`` route — the
+-    same source MCP's ``describe_schema`` tool reads. This handler is the
+-    only place in the data layer that does not go through the Context
+-    Manager, because the schema query is pure Neptune SPARQL and doesn't
+-    involve any tiered orchestration.
+-    """
+-    if not ONTOLOGY_PROXY_LAMBDA_ARN:
+-        return _error_response(501, "DescribeSchema unavailable: ONTOLOGY_PROXY_LAMBDA_ARN not configured")
+-
+-    query = event.get("queryStringParameters") or {}
+-    try:
+-        forwarded_query = _parse_describe_schema_query(query)
+-    except contract.ContractViolation as exc:
+-        return _error_response(400, str(exc))
++    """Deny schema discovery until source-level authorization exists."""
++    return _error_response(403, "Schema discovery is disabled")
+ 
+-    proxy_event = {
+-        "httpMethod": "GET",
+-        "resource": DESCRIBE_SCHEMA_RESOURCE,
+-        "path": f"/namespaces/{namespace}/schema",
+-        "pathParameters": {"namespaceId": namespace},
+-        "queryStringParameters": forwarded_query or None,
+-        "headers": {"Authorization": f"Bearer {_get_bearer_token(event)}"},
+-        "body": None,
+-        "isBase64Encoded": False,
+-        "requestContext": {"stage": "data-layer"},
+-    }
+ 
+-    # Map invoke failures to a 502 naming the schema backend, not the Context Manager.
+-    try:
+-        response = _get_lambda_client().invoke(
+-            FunctionName=ONTOLOGY_PROXY_LAMBDA_ARN,
+-            InvocationType="RequestResponse",
+-            Payload=json.dumps(proxy_event).encode("utf-8"),
+-        )
+-    except (ClientError, BotoCoreError) as exc:
+-        logger.exception("describe_schema_invoke_failed", exc_info=exc)
+-        return _error_response(502, "Failed to invoke schema backend Lambda")
+-
+-    if "FunctionError" in response:
+-        # The payload can carry ARNs and tracebacks: log a preview, return a generic message.
+-        err_preview = response["Payload"].read().decode("utf-8", errors="replace")[:500]
+-        logger.warning(
+-            "describe_schema_function_error function_error=%s request_id=%s err_preview=%s",
+-            response.get("FunctionError"),
+-            response.get("ResponseMetadata", {}).get("RequestId"),
+-            err_preview,
+-        )
+-        return _error_response(502, "Schema backend failed")
+-
+-    # A successful invoke can still return a non-JSON payload.
+-    try:
+-        proxy_response = json.loads(response["Payload"].read().decode("utf-8"))
+-    except ValueError as exc:
+-        logger.warning("describe_schema_invalid_envelope", exc_info=exc)
+-        return _error_response(502, "Schema backend returned invalid JSON")
+-
+-    status_code = proxy_response.get("statusCode", 200)
+-    body_str = proxy_response.get("body", "{}")
+-    try:
+-        body = json.loads(body_str) if isinstance(body_str, str) else body_str
+-    except (json.JSONDecodeError, TypeError) as exc:
+-        logger.warning("describe_schema_invalid_body body_preview=%s", str(body_str)[:200], exc_info=exc)
+-        body = {}
+-
+-    if status_code >= 400:
+-        message = body.get("message") if isinstance(body, dict) else None
+-        return _error_response(status_code, message or f"Schema backend returned {status_code}")
+-
+-    # Project only the modelled fields so backend changes cannot leak internal ones.
+-    return _success_response(
+-        200,
+-        {
+-            "classes": body.get("classes", []) if isinstance(body, dict) else [],
+-            "ontologyVersion": body.get("ontologyVersion") if isinstance(body, dict) else None,
+-        },
+-    )
+-
+-
+ # Error types the Context Manager itself emits (``coa_serve.exceptions`` plus the
+ # entrypoint's own validation/internal errors). An HTTP error body carrying one of
+ # these is our service's structured, client-safe error; anything else came from
+--- a/packages/data-layer/tests/unit/test_contract_bounds.py
++++ b/packages/data-layer/tests/unit/test_contract_bounds.py
+@@ -555,43 +555,13 @@
+     result, invoke = _post(_GRAPH_TRAVERSE, {"startUri": _URI, "relationshipFilter": []})
+     assert result["statusCode"] == 200
+     assert "relationshipFilter" not in invoke.call_args.args[0]["options"]
+-
+-
+-def _schema(query: dict) -> tuple[dict, MagicMock]:
+-    client = MagicMock()
+-    client.invoke.return_value = {
+-        "StatusCode": 200,
+-        "Payload": MagicMock(read=lambda: json.dumps({"statusCode": 200, "body": "{}"}).encode()),
+-    }
+-    with patch.object(handler_module, "_get_lambda_client", return_value=client):
+-        return handler(_event("GET", _SCHEMA, query=query), None), client
+-
+-
+-@pytest.mark.parametrize(
+-    ("field", "bad"),
+-    [
+-        ("maxResults", "0"),
+-        ("maxResults", "1001"),
+-        ("maxResults", "-1"),
+-        ("maxResults", "1.5"),
+-        ("maxResults", "ten"),
+-        ("maxResults", "9" * 40),
+-        ("includeProperties", "yes"),
+-        ("includeProperties", "1"),
+-    ],
+-)
+-def test_describe_schema_rejects_out_of_contract_query(field, bad):
+-    result, client = _schema({field: bad})
+-    assert result["statusCode"] == 400
+-    assert field in json.loads(result["body"])["message"]
+-    client.invoke.assert_not_called()
+ 
+ 
+-def test_describe_schema_accepts_boundary_values():
+-    result, client = _schema({"maxResults": "1000", "includeProperties": "TRUE"})
+-    assert result["statusCode"] == 200
+-    forwarded = json.loads(client.invoke.call_args.kwargs["Payload"].decode())
+-    assert forwarded["queryStringParameters"] == {"maxResults": "1000", "includeProperties": "true"}
++def test_schema_is_denied_even_with_valid_query():
++    with patch("boto3.client") as client:
++        result = handler(_event("GET", _SCHEMA, query={"maxResults": "1000"}), None)
++    assert result["statusCode"] == 403
++    client.assert_not_called()
+ 
+ 
+ @pytest.mark.parametrize(
+--- a/packages/data-layer/tests/unit/test_handler_validation.py
++++ b/packages/data-layer/tests/unit/test_handler_validation.py
+@@ -681,152 +681,17 @@
+ 
+ @pytest.mark.unit
+ class TestDescribeSchema:
+-    """GET /namespaces/{ns}/schema proxies to the ontology-api-proxy Lambda."""
+-
+-    def _fake_proxy_response(self, body: dict, status: int = 200) -> dict:
+-        """Shape a synthetic Lambda invoke response with an API GW proxy body."""
+-        return {
+-            "StatusCode": 200,
+-            "Payload": io.BytesIO(
+-                json.dumps(
+-                    {
+-                        "statusCode": status,
+-                        "body": json.dumps(body),
+-                        "headers": {},
+-                    }
+-                ).encode("utf-8")
+-            ),
+-        }
+-
+-    def test_returns_classes_from_proxy(self):
+-        proxy_body = {
+-            "classes": [
+-                {"uri": "urn:c:1", "label": "Policy", "properties": []},
+-            ],
+-            "ontologyVersion": "2026-08-12",
+-        }
+-        mock_client = MagicMock()
+-        mock_client.invoke.return_value = self._fake_proxy_response(proxy_body)
+-        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+-            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+-            result = handler(event, None)
+-        assert result["statusCode"] == 200
+-        body = json.loads(result["body"])
+-        assert body["classes"] == proxy_body["classes"]
+-        assert body["ontologyVersion"] == "2026-08-12"
+-
+-    def test_forwards_camelcase_query_params_verbatim(self):
+-        """The ontology-api-proxy renames maxResults→max_results per path; the
+-        data layer must pass the camelCase form through unchanged so the alias
+-        is what runs."""
+-        mock_client = MagicMock()
+-        mock_client.invoke.return_value = self._fake_proxy_response({"classes": [], "ontologyVersion": ""})
+-        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+-            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+-            event["queryStringParameters"] = {"maxResults": "50", "includeProperties": "false"}
+-            handler(event, None)
+-        forwarded = json.loads(mock_client.invoke.call_args.kwargs["Payload"].decode())
+-        assert forwarded["queryStringParameters"] == {"maxResults": "50", "includeProperties": "false"}
+-        # Canonical Smithy path; api-proxy's alias table routes to /graph/schema.
+-        assert forwarded["resource"] == "/namespaces/{namespaceId}/schema"
+-
+-    def test_bearer_token_forwarded(self):
+-        mock_client = MagicMock()
+-        mock_client.invoke.return_value = self._fake_proxy_response({"classes": [], "ontologyVersion": ""})
+-        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+-            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+-            event["headers"] = {"Authorization": "Bearer forwarded-token"}
+-            handler(event, None)
+-        forwarded = json.loads(mock_client.invoke.call_args.kwargs["Payload"].decode())
+-        assert forwarded["headers"]["Authorization"] == "Bearer forwarded-token"
+-
+-    def test_proxy_error_status_propagates(self):
+-        proxy_body = {"message": "namespace not found"}
+-        mock_client = MagicMock()
+-        mock_client.invoke.return_value = self._fake_proxy_response(proxy_body, status=404)
+-        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+-            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
++    @pytest.mark.parametrize("namespace", ["e1d5ef72-b16c-4e3c-9801-b6f4f397927a", "b2967b7a-8207-4728-b776-2ae543a83657"])
++    def test_denies_schema_without_invoking_backend(self, namespace):
++        event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
++        event["pathParameters"]["namespaceId"] = namespace
++        with patch("boto3.client") as client:
+             result = handler(event, None)
+-        assert result["statusCode"] == 404
+-        assert "namespace not found" in result["body"]
+-
+-    def test_missing_env_var_returns_501(self):
+-        with patch.object(handler_module, "ONTOLOGY_PROXY_LAMBDA_ARN", ""):
+-            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+-            result = handler(event, None)
+-        assert result["statusCode"] == 501
+-        assert "ONTOLOGY_PROXY_LAMBDA_ARN" in result["body"]
++        assert result["statusCode"] == 403
++        assert json.loads(result["body"])["message"] == "Schema discovery is disabled"
++        client.assert_not_called()
+ 
+-    def test_response_does_not_leak_extra_fields(self):
+-        """The Smithy output is `classes` + `ontologyVersion` only. A future
+-        backend change must not add fields to the customer response by accident."""
+-        proxy_body = {
+-            "classes": [],
+-            "ontologyVersion": "v1",
+-            "namespace": "9142f178-...",  # ontology-engine echoes this today
+-            "internal_debug": "should never surface",
+-        }
+-        mock_client = MagicMock()
+-        mock_client.invoke.return_value = self._fake_proxy_response(proxy_body)
+-        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+-            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+-            result = handler(event, None)
+-        body = json.loads(result["body"])
+-        assert set(body.keys()) == {"classes", "ontologyVersion"}
+ 
+-    def test_client_error_on_invoke_maps_to_502(self):
+-        """A boto3 ClientError from lambda:Invoke is a 502 naming the schema backend."""
+-        mock_client = MagicMock()
+-        mock_client.invoke.side_effect = ClientError(
+-            {"Error": {"Code": "ThrottlingException", "Message": "Rate exceeded"}},
+-            "Invoke",
+-        )
+-        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+-            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+-            result = handler(event, None)
+-        assert result["statusCode"] == 502
+-        assert "Failed to invoke schema backend Lambda" in result["body"]
+-        # And crucially not misdiagnosed as a CM failure.
+-        assert "Context Manager" not in result["body"]
+-
+-    def test_malformed_envelope_json_returns_502(self):
+-        """A non-JSON invoke payload is a 502, not an unhandled exception."""
+-        mock_client = MagicMock()
+-        mock_client.invoke.return_value = {
+-            "StatusCode": 200,
+-            "Payload": io.BytesIO(b"not-valid-json{{{"),
+-        }
+-        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+-            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+-            result = handler(event, None)
+-        assert result["statusCode"] == 502
+-        assert "Schema backend returned invalid JSON" in result["body"]
+-
+-    def test_function_error_does_not_leak_lambda_internals(self):
+-        """The FunctionError payload is logged, never returned to the caller."""
+-        secret_payload = (
+-            b'{"errorMessage": "Traceback... at /var/task/handler.py line 42: '
+-            b'arn:aws:iam::123456789012:role/internal-role", "errorType": "RuntimeError"}'
+-        )
+-        mock_client = MagicMock()
+-        mock_client.invoke.return_value = {
+-            "StatusCode": 200,
+-            "FunctionError": "Unhandled",
+-            "Payload": io.BytesIO(secret_payload),
+-        }
+-        with patch.object(handler_module, "_get_lambda_client", return_value=mock_client):
+-            event = _api_event("GET", "/namespaces/{namespaceId}/schema", body=None)
+-            result = handler(event, None)
+-        assert result["statusCode"] == 502
+-        body_text = result["body"]
+-        assert "Schema backend failed" in body_text
+-        # Nothing from the Lambda error payload may reach the customer.
+-        assert "Traceback" not in body_text
+-        assert "arn:aws:iam" not in body_text
+-        assert "handler.py" not in body_text
+-        assert "RuntimeError" not in body_text
+-
+-
+ @pytest.mark.unit
+ class TestQueryLengthBoundReportsItsOwnReason:
+     """An over-long query reports the length bound, not a missing field."""
+@@ -896,13 +761,13 @@
+ def test_malformed_namespace_id_is_400_before_any_backend_call(namespace, method, resource):
+     with (
+         patch.object(handler_module, "_invoke_context_manager") as invoke,
+-        patch.object(handler_module, "boto3") as boto,
++        patch("boto3.client") as boto,
+     ):
+         result = handler(_api_event(method, resource, body={"query": "hi"}, namespace=namespace), None)
+     assert result["statusCode"] == 400
+     assert "UUID v4" in json.loads(result["body"])["message"]
+     invoke.assert_not_called()
+-    boto.client.assert_not_called()
++    boto.assert_not_called()
+ 
+ 
+ @pytest.mark.unit
+--- a/packages/mcp-server/src/coa_mcp/server.py
++++ b/packages/mcp-server/src/coa_mcp/server.py
+@@ -328,61 +328,8 @@
+     includeProperties: bool = True,
+     classFilter: str | None = None,
+ ) -> str:
+-    """Describe available ontology classes, properties, and data source tables.
+-
+-    Returns the schema structure of the namespace — classes, their properties,
+-    and connected data sources. Use this tool to understand what data is
+-    available and how entities are related before querying. Classes mapped to
+-    tables (queryable through SQL) are listed first, then the rest by label;
+-    classFilter (an exact class IRI, or an IRI namespace ending in # or /) is
+-    applied before maxResults, so matching classes are not crowded out by the page limit.
+-
+-    This is a read-only, lightweight lookup — no LLM calls, no SQL execution.
+-
+-    Args:
+-        ctx: MCP request context carrying the caller's identity and bearer token.
+-        namespaceId: The namespace to describe.
+-        maxResults: Maximum number of classes to return (default 100, max 500).
+-        includeProperties: Whether to include properties for each class (default True).
+-        classFilter: Optional class URI or prefix to restrict the response to a
+-            single class or subtree. Matches the Smithy ``DescribeSchema`` input.
+-
+-    Returns:
+-        JSON with ``classes`` array and ``ontologyVersion``. Same envelope as
+-        ``GET /namespaces/{namespaceId}/schema`` on the data-layer surface.
+-    """
+-    start = time.perf_counter()
+-    caller = None
+-    try:
+-        caller, profile = await _resolve_caller_and_profile(
+-            namespaceId, ctx, cedar_action=TOOL_CEDAR_ACTION["describe_schema"]
+-        )
+-        token = _extract_bearer_token(ctx)
+-        lc = _get_lambda_client()
+-        authz_ctx = _build_authorizer_context(caller, profile) if caller.user_id != "local-dev" else None
+-        result = await discovery.describe_schema(
+-            lc,
+-            namespaceId,
+-            token,
+-            max_results=maxResults,
+-            include_properties=includeProperties,
+-            class_filter=classFilter,
+-            authorizer_context=authz_ctx,
+-        )
+-        duration_ms = int((time.perf_counter() - start) * 1000)
+-        if caller:
+-            log_tool_invocation(caller, "describe_schema", namespaceId, duration_ms=duration_ms)
+-        return json.dumps(result, indent=2)
+-
+-    except (ClaimsExtractionError, GrantResolutionError) as e:
+-        if caller:
+-            log_tool_invocation(caller, "describe_schema", namespaceId, success=False, error=str(e))
+-        raise ValueError(str(e)) from e
+-    except Exception as e:
+-        logger.error("describe_schema_failed", namespace=namespaceId, error=str(e))
+-        if caller:
+-            log_tool_invocation(caller, "describe_schema", namespaceId, success=False, error=str(e))
+-        raise
++    """Deny schema discovery until source-level authorization exists."""
++    raise ValueError("Schema discovery is disabled")
+ 
+ 
+ # A Literal (not ``str``) so FastMCP publishes the accepted values in the tool schema.
+--- a/packages/mcp-server/tests/unit/test_server.py
++++ b/packages/mcp-server/tests/unit/test_server.py
+@@ -10,6 +10,7 @@
+ 
+ import json
+ import time
++from unittest.mock import AsyncMock
+ 
+ import jwt
+ import pytest
+@@ -380,49 +381,14 @@
+ 
+ @pytest.mark.unit
+ class TestDescribeSchemaTool:
+-    @pytest.mark.asyncio
+-    async def test_returns_serialized_classes(self, monkeypatch, _local_dev):
+-        async def fake_delegate(lc, ns, token, **kwargs):
+-            return {"classes": [{"label": "Order"}], "ontologyVersion": "v2"}
+-
+-        monkeypatch.setattr(server.discovery, "describe_schema", fake_delegate)
+-        out = await server.describe_schema(None, "sales")
+-        parsed = json.loads(out)
+-        assert parsed["classes"][0]["label"] == "Order"
+-
+     @pytest.mark.asyncio
+-    async def test_forwards_class_filter(self, monkeypatch, _local_dev):
+-        """``classFilter`` reaches the discovery helper."""
+-        captured: dict = {}
+-
+-        async def fake_delegate(lc, ns, token, **kwargs):
+-            captured.update(kwargs)
+-            return {"classes": []}
+-
+-        monkeypatch.setattr(server.discovery, "describe_schema", fake_delegate)
+-        await server.describe_schema(None, "sales", classFilter="https://schema.org/Order")
+-        assert captured["class_filter"] == "https://schema.org/Order"
+-
+-    @pytest.mark.asyncio
+-    async def test_grant_error_maps_to_value_error(self, monkeypatch):
+-        monkeypatch.setattr(server.config, "auth_enabled", True)
+-
+-        async def deny(*args, **kwargs):
+-            raise GrantResolutionError("nope")
+-
+-        monkeypatch.setattr(server, "resolve_grant", deny)
+-        token = create_test_token(user_id="alice", namespaces=["sales"])
+-        with pytest.raises(ValueError, match="nope"):
+-            await server.describe_schema(_FakeCtx(f"Bearer {token}"), "sales")
+-
+-    @pytest.mark.asyncio
+-    async def test_backend_error_reraised(self, monkeypatch, _local_dev):
+-        async def boom(*args, **kwargs):
+-            raise RuntimeError("ontology proxy down")
+-
+-        monkeypatch.setattr(server.discovery, "describe_schema", boom)
+-        with pytest.raises(RuntimeError, match="ontology proxy down"):
+-            await server.describe_schema(None, "sales")
++    @pytest.mark.parametrize("namespace", ["sales", "finance"])
++    async def test_denies_schema_without_invoking_backend(self, monkeypatch, namespace):
++        delegate = AsyncMock()
++        monkeypatch.setattr(server.discovery, "describe_schema", delegate)
++        with pytest.raises(ValueError, match="Schema discovery is disabled"):
++            await server.describe_schema(None, namespace)
++        delegate.assert_not_awaited()
+ 
+ 
+ @pytest.mark.unit
