@@ -3,7 +3,8 @@
 @@ -748,6 +748,23 @@
          description: "Context Manager orchestration service",
        });
- 
+-
++
 +      // Private-source access requires every runtime invocation to pass through the gateway.
 +      const gatewayArn = this.node.tryGetContext("team_context_gateway_arn");
 +      const gatewayMatch = typeof gatewayArn === "string"
@@ -36,7 +37,8 @@
      "123456789012.dkr.ecr.us-east-1.amazonaws.com/coa-dev:latest",
    "aws:cdk:bundling-stacks": [],
 @@ -66,7 +68,33 @@
- 
+-
++
    return Template.fromStack(stack);
  }
 +
@@ -52,7 +54,8 @@
 +      },
 +    });
 +  });
- 
+-
++
 +  it.each([
 +    undefined,
 +    "",
