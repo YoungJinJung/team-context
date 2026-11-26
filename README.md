@@ -10,7 +10,7 @@ The diagram is a **proposed AWS architecture**, not the current deployment. See 
 
 ## COA and private data
 
-[AWS Context Ontology Accelerator](https://github.com/aws/context-ontology-accelerator) has its own MCP server and OIDC/Cognito and Cedar authorization. Team Context's local MCP is a separate public-search prototype; this repository does not yet connect to COA. COA namespace permissions alone do not establish that a requester can access each original GitHub, GitLab, Jira, Confluence, or Teams item. Identity-to-connector binding, source permission checks, derived-data provenance, and deletion and revocation propagation remain open in [issue #68](https://github.com/YoungJinJung/team-context/issues/68). Do not use the prototype to serve company private data.
+[AWS Context Ontology Accelerator](https://github.com/aws/context-ontology-accelerator) has its own MCP server and OIDC/Cognito and Cedar authorization. Team Context's local MCP is a separate public-search prototype; this repository does not yet connect to COA. COA namespace permissions alone do not establish that a requester can access each original GitHub, GitLab, Jira, Confluence, or Teams item. Identity-to-connector binding, source permission checks, derived-data provenance, and deletion and revocation propagation remain open in [issue #68](https://github.com/YoungJinJung/team-context/issues/68). Do not use the prototype to serve company private data. An optional COA v0.3.11 identity-verification adapter exists for Python 3.12+, but it is not yet connected to account linking or the MCP server.
 
 ## What works today
 
@@ -126,9 +126,12 @@ TEAM_CONTEXT_INTEGRATION=1 uv run --no-sync pytest -q tests/test_localstack.py
 # Full backend mutation test; remove previous generated results first
 python3 -c "import shutil; shutil.rmtree('mutants', ignore_errors=True)"
 uv run --no-sync mutmut run --max-children 4
+uv run --no-sync mutmut run --max-children 2 'auth.coa_identity.*'
 uv run --no-sync mutmut export-cicd-stats
 uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
 ```
+
+The COA identity tests and complete mutation gate require Python 3.12 or newer and the `coa` dependency group. `uv sync --no-install-project --all-extras --python 3.12` installs it from the pinned COA v0.3.11 source. The Python 3.11 local prototype does not include this optional adapter.
 
 CI requires a backend mutation score of at least 90%, calculated as killed mutants divided by all mutants; tool errors are not counted as kills. UI JavaScript does not yet have a mutation gate ([issue #59](https://github.com/YoungJinJung/team-context/issues/59)). Mocked OAuth tests do not replace testing against a real provider registration.
 

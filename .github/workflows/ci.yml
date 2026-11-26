@@ -23,6 +23,8 @@ jobs:
       - name: Mutation tests
         run: |
           uv run --no-sync mutmut run --max-children 2
+          # Re-run COA mutations after the full run to avoid false kills in the forked runner.
+          uv run --no-sync mutmut run --max-children 2 'auth.coa_identity.*'
           uv run --no-sync mutmut export-cicd-stats
           uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
       - name: Publish mutation report

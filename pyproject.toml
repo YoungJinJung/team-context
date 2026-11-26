@@ -10,12 +10,16 @@ dependencies = [
 mcp = [
     "mcp>=2,<3",
 ]
+coa = [
+    "coa-common ; python_full_version >= '3.12'",
+]
 
 [dependency-groups]
 dev = [
     "pytest>=8,<10",
     "mutmut>=3.8,<4",
     "mcp>=2,<3",
+    "coa-common>=0.3.11 ; python_full_version >= '3.12'",
 ]
 
 [tool.pytest.ini_options]
@@ -24,5 +28,8 @@ pythonpath = ["."]
 
 [tool.mutmut]
 also_copy = ["index.html"]
-source_paths = ["mcp_server.py", "app.py", "storage.py", "init_local.py", "connectors/github.py", "connectors/gitlab.py", "scripts/check_mutation.py", "scripts/private_snapshots.py", "auth/providers.py", "auth/atlassian.py", "auth/atlassian_preview.py", "auth/linear.py", "auth/teams.py", "auth/teams_preview.py", "auth/gitlab.py", "auth/gitlab_preview.py", "auth/gitlab_private.py", "auth/github_private.py", "auth/github.py", "auth/github_preview.py", "auth/vault.py", "auth/sessions.py", "auth/session_store.py", "auth/linear_preview.py", "auth/transport.py", "source_verification.py"]
+source_paths = ["mcp_server.py", "app.py", "storage.py", "init_local.py", "connectors/github.py", "connectors/gitlab.py", "scripts/check_mutation.py", "scripts/private_snapshots.py", "auth/coa_identity.py", "auth/providers.py", "auth/atlassian.py", "auth/atlassian_preview.py", "auth/linear.py", "auth/teams.py", "auth/teams_preview.py", "auth/gitlab.py", "auth/gitlab_preview.py", "auth/gitlab_private.py", "auth/github_private.py", "auth/github.py", "auth/github_preview.py", "auth/vault.py", "auth/sessions.py", "auth/session_store.py", "auth/linear_preview.py", "auth/transport.py", "source_verification.py"]
 pytest_add_cli_args_test_selection = ["tests"]
+
+[tool.uv.sources]
+coa-common = { git = "https://github.com/aws/context-ontology-accelerator", subdirectory = "libs/common", rev = "v0.3.11" }
