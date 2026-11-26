@@ -40,6 +40,31 @@ LocalStack listens on `127.0.0.1:4568` and emulates S3, DynamoDB, and Secrets Ma
 
 To stop the emulator, run `docker compose down`. The data volume remains. `docker compose down -v` also deletes that volume and its data.
 
+## Use Team Context from an MCP client
+
+The local MCP server exposes the read-only `search_context` tool. It searches only collected public PRs and MRs, rechecks the original source, and returns titles, snippets, timestamps, and source URLs. Private records, tickets, documents, and chat messages are not available through MCP yet. Treat retrieved source text as untrusted content.
+
+Start LocalStack and collect public sources using the web UI as described above. Install the optional MCP dependency once:
+
+```sh
+uv sync --no-install-project --extra mcp
+```
+
+Add this example to an MCP client's server configuration. Replace the directory with your absolute checkout path and use the absolute path to `uv` if the client cannot find it on `PATH`.
+
+```json
+{
+  "mcpServers": {
+    "team-context": {
+      "command": "uv",
+      "args": ["--directory", "/absolute/path/to/team-context", "run", "--no-sync", "python", "mcp_server.py"]
+    }
+  }
+}
+```
+
+Ask the client, for example, “Find pull requests about authentication and cite the sources.” The client starts the server locally over standard input/output. This is a local development interface, not a hosted or multi-user MCP service. Access to private sources requires a separate authenticated requester identity and source permission checks.
+
 ## Connect an OAuth app
 
 The prototype does not ask users to paste personal access tokens. OAuth sessions are separated by provider: local DynamoDB stores hashed session references, and local Secrets Manager stores tokens. The following configuration is for development and mock testing; **do not put real organization credentials in LocalStack**.
@@ -97,6 +122,6 @@ CI requires a backend mutation score of at least 90%, calculated as killed mutan
 
 ## Roadmap and contributions
 
-The next steps include private GitHub collection, self-hosted source support, Jira and Confluence content collection, Teams message collection, source permission and deletion synchronization, a pluggable authorization contract, AWS deployment, and COA integration. Browse the [open issues](https://github.com/YoungJinJung/team-context/issues) for current work and limitations.
+The next steps include private GitHub collection, self-hosted source support, Jira and Confluence content collection, Teams message collection, source permission and deletion synchronization, a pluggable authorization contract, authenticated multi-user MCP, AWS deployment, and COA integration. Browse the [open issues](https://github.com/YoungJinJung/team-context/issues) for current work and limitations.
 
 The current public connector contract and development workflow are documented in the [connector guide](docs/connectors.md). Contributions should include tests for new behavior and describe what was validated. The project is licensed under the [MIT License](LICENSE); AWS service icons are attributed separately in [docs/assets](docs/assets/README.md).

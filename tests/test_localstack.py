@@ -401,3 +401,28 @@ def test_atlassian_session_is_isolated_in_local_emulator():
         assert session_store.get(session) is None
     finally:
         session_store.remove(session, namespace='atlassian')
+
+
+def test_mcp_search_excludes_private_snapshots_and_revalidates_public():
+    from unittest.mock import patch
+    from uuid import uuid4
+    from mcp_server import search_context
+    marker = 'mcp' + uuid4().hex
+    s3, _ = clients()
+    public = {'id':marker, 'visibility':'public', 'title':marker, 'url':'https://github.com/a/b/pull/1', 'type':'pull_request', 'updated_at':'2026-01-01', 'body':'public'}
+    key = hashlib.sha256(marker.encode()).hexdigest() + '.json'
+    private_key = 'private/gitlab/' + str(int(uuid4().hex[:10],16)) + '.json'
+    try:
+        s3.put_object(Bucket='team-context-records', Key=key, Body=json.dumps(public).encode())
+        s3.put_object(Bucket='team-context-records', Key=private_key, Body=json.dumps({'visibility':'private','title':marker}).encode())
+        with patch('storage.current', return_value=True) as current:
+            result = search_context(marker)
+        assert len(result['items']) == 1 and result['items'][0]['snippet'] == 'public'
+        current.assert_called_once_with(public)
+        with patch('storage.current', return_value=False):
+            assert search_context(marker) == {'items':[]}
+        with patch('storage.current', side_effect=OSError('secret')):
+            assert search_context(marker) == {'error':'Unable to search public sources'}
+    finally:
+        s3.delete_object(Bucket='team-context-records', Key=key)
+        s3.delete_object(Bucket='team-context-records', Key=private_key)
