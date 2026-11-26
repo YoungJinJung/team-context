@@ -10,7 +10,7 @@ from scripts.check_coa_gateway import check
 from scripts import check_coa_gateway
 
 RUNTIME='arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/CoaRuntime-0123456789'
-GATEWAY='arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/gateway-123'
+GATEWAY='arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/gateway-0123456789'
 RID='CoaRuntime-0123456789'
 TIME=datetime(2026,1,1,tzinfo=timezone.utc)
 

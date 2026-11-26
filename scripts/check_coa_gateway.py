@@ -5,7 +5,7 @@ import re
 import boto3
 
 _RUNTIME = re.compile(r'arn:(aws(?:-[a-z]+)*):bedrock-agentcore:([a-z0-9-]+):([0-9]{12}):runtime/([A-Za-z][A-Za-z0-9_]{0,47}-[A-Za-z0-9]{10})')
-_GATEWAY_ID = re.compile(r'[A-Za-z0-9-]{1,100}')
+_GATEWAY_ID = re.compile(r'(?:[0-9a-z]-?){1,100}-[0-9a-z]{10}')
 _ENDPOINT = re.compile(r'[A-Za-z][A-Za-z0-9_]{0,47}')
 _VERSION = re.compile(r'[1-9][0-9]{0,4}')
 

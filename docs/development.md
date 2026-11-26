@@ -59,7 +59,7 @@ GitHub.com PR과 GitLab.com MR의 내부 출처 검증은 조회자의 연결된
 uv run --no-sync python -m scripts.check_coa_gateway \
   --region us-east-1 \
   --runtime-arn 'arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/Example-0123456789' \
-  --gateway-arn 'arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/example'
+  --gateway-arn 'arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/example-0123456789'
 ```
 
 이 명령은 `ListAgentRuntimeEndpoints`, `GetAgentRuntime` 권한이 필요하며 IAM 역할 등 AWS의 임시 자격 증명을 사용합니다. `allowedWorkloadConfiguration`을 인식하는 최신 boto3/botocore가 필요합니다. 페이지 전체와 각 활성 버전을 확인하며, 여러 Gateway나 별도 workload identity가 허용되어 있으면 실패합니다. 엔드포인트 목록이 검사 중 바뀌어도 실패합니다.
