@@ -62,7 +62,7 @@ jobs:
         run: git -C coa-upstream apply "$GITHUB_WORKSPACE/patches/coa-v0.3.11-gateway-only.patch"
       - name: Install COA infrastructure dependencies
         working-directory: coa-upstream
-        run: pnpm install --filter 'coa-infra...' --frozen-lockfile --ignore-scripts
+        run: pnpm install --filter 'coa-infra...' --filter 'coa-web-app...' --frozen-lockfile --ignore-scripts
       - name: Build COA shared types
         working-directory: coa-upstream
         run: pnpm --filter @coa/shared build
@@ -104,3 +104,16 @@ jobs:
         run: pnpm --filter coa-infra exec jest test/services/data-layer-stack.test.ts --runInBand --coverage=false
       - name: Test data-layer gateway routing mutations
         run: python3 tests/coa_data_gateway_mutations.py coa-upstream
+      - name: Apply COA web gateway patch
+        run: git -C coa-upstream apply "$GITHUB_WORKSPACE/patches/coa-v0.3.11-web-gateway.patch"
+      - name: Rebuild COA shared runtime types
+        working-directory: coa-upstream
+        run: pnpm --filter @coa/shared build
+      - name: Test COA web gateway configuration
+        working-directory: coa-upstream/infra
+        run: pnpm exec jest test/foundation/web-stack.test.ts test/constructs/public-ui-csp.test.ts --runInBand --coverage=false --testNamePattern='gateway routing|configured gateway'
+      - name: Test COA web gateway requests
+        working-directory: coa-upstream/packages/web-app
+        run: pnpm exec vitest run tests/unit/utils/build-query-endpoint.test.ts tests/unit/utils/gateway-requests.test.tsx
+      - name: Test web gateway routing mutations
+        run: python3 tests/coa_web_gateway_mutations.py coa-upstream

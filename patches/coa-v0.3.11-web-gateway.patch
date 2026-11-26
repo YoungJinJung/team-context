@@ -1,0 +1,396 @@
+--- a/infra/lib/constructs/public-ui-construct.ts
++++ b/infra/lib/constructs/public-ui-construct.ts
+@@ -25,7 +25,7 @@
+  * and OIDC authority. The API URL is usually a cross-stack token at synth; its
+  * origin is derived in CloudFormation so it is still allowlisted explicitly.
+  * Only when no API endpoint is configured at all do we fall back to a
+- * scheme-level `https:` so the app still functions. `frame-src`
++ * no API origin. `frame-src`
+  * includes the OIDC authority for silent-token-renew iframes.
+  *
+  * `style-src` retains `'unsafe-inline'` because Cloudscape/emotion inject
+@@ -60,9 +60,15 @@
+   const apiOrigin = originOf(runtimeConfig.apiEndpoint);
+   const authOrigin = originOf(runtimeConfig.authority);
+ 
+-  // AgentCore origin for SSE streaming (Playground fetches directly)
+-  const agentCoreOrigin = runtimeConfig.serveRuntimeArn
+-    ? `https://bedrock-agentcore.${runtimeConfig.region}.amazonaws.com`
++  // Permit only the configured gateway origin for streaming queries.
++  const gateway = runtimeConfig.serveGatewayArn
++    ? /^arn:(aws|aws-cn|aws-us-gov):bedrock-agentcore:([a-z0-9-]+):([0-9]{12}):gateway\/((?:[0-9a-z]-?){1,100}-[0-9a-z]{10})$/.exec(runtimeConfig.serveGatewayArn)
++    : null;
++  const gatewayOrigin = gateway && gateway[0] === runtimeConfig.serveGatewayArn &&
++    gateway[2] === runtimeConfig.region && gateway[3] === runtimeConfig.serveGatewayAccount &&
++    (gateway[1] === "aws-cn") === runtimeConfig.region.startsWith("cn-") &&
++    (gateway[1] === "aws-us-gov") === runtimeConfig.region.startsWith("us-gov-")
++    ? `https://${gateway[4]}.gateway.bedrock-agentcore.${gateway[2]}.${gateway[1] === "aws-cn" ? "amazonaws.com.cn" : "amazonaws.com"}`
+     : undefined;
+ 
+   // Cognito user-pool IdP endpoint. The browser OIDC flow always calls this
+@@ -103,7 +109,7 @@
+   for (const o of [
+     apiOrigin,
+     authOrigin,
+-    agentCoreOrigin,
++    gatewayOrigin,
+     cognitoOrigin,
+     cognitoHostedUiOrigin,
+     ...s3Origins,
+@@ -113,12 +119,6 @@
+   if (authOrigin) frame.add(authOrigin); // OIDC silent-renew iframe
+   if (cognitoOrigin) frame.add(cognitoOrigin); // OIDC iframe against the IdP
+   if (cognitoHostedUiOrigin) frame.add(cognitoHostedUiOrigin); // silent-renew iframe
+-
+-  // No API endpoint configured at all → permit scheme-level so the app still
+-  // works. A cross-stack (token) endpoint is resolved above and never lands here.
+-  if (!apiOrigin) {
+-    connect.add("https:");
+-  }
+ 
+   // `default-src 'none'`: every fetch directive the SPA uses is declared
+   // explicitly below, so the fallback only catches types it never loads
+--- a/infra/lib/stacks/foundation/web-stack.ts
++++ b/infra/lib/stacks/foundation/web-stack.ts
+@@ -36,7 +36,7 @@
+ /**
+  * Assemble the {@link RuntimeConfig} written to `runtime-config.json`. Optional
+  * fields are omitted (not emitted as `undefined`) so a missing apiEndpoint,
+- * serveRuntimeArn, or version leaves no key behind — the frontend treats an
++ * gateway configuration, or version leaves no key behind — the frontend treats an
+  * absent key and an absent value identically. Pure and exported so the
+  * include/omit behavior is unit-testable without a synth.
+  */
+@@ -46,7 +46,9 @@
+   authority: string;
+   clientId: string;
+   apiEndpoint?: string;
+-  serveRuntimeArn?: string;
++  serveGatewayArn?: string;
++  serveGatewayTarget?: string;
++  serveGatewayAccount?: string;
+   mcpRuntimeArn?: string;
+   version?: string;
+   graphSourcesEnabled?: boolean;
+@@ -57,7 +59,9 @@
+     authority,
+     clientId,
+     apiEndpoint,
+-    serveRuntimeArn,
++    serveGatewayArn,
++    serveGatewayTarget,
++    serveGatewayAccount,
+     mcpRuntimeArn,
+     version,
+     graphSourcesEnabled,
+@@ -68,7 +72,9 @@
+     authority,
+     clientId,
+     ...(apiEndpoint && { apiEndpoint }),
+-    ...(serveRuntimeArn && { serveRuntimeArn }),
++    ...(serveGatewayArn && { serveGatewayArn }),
++    ...(serveGatewayTarget && { serveGatewayTarget }),
++    ...(serveGatewayAccount && { serveGatewayAccount }),
+     ...(mcpRuntimeArn && { mcpRuntimeArn }),
+     ...(version && { version }),
+     // Written only when on, so an off deployment's runtime-config is unchanged.
+@@ -206,13 +212,32 @@
+       ? `https://${apiDomainName}`
+       : props.apiEndpoint;
+ 
++    const gatewayArn = this.node.tryGetContext("team_context_gateway_arn");
++    const gatewayTarget = this.node.tryGetContext("team_context_gateway_target");
++    if (props.serveRuntimeArn) {
++      const gatewayMatch = typeof gatewayArn === "string"
++        ? /^arn:(aws|aws-cn|aws-us-gov):bedrock-agentcore:([a-z0-9-]+):([0-9]{12}):gateway\/((?:[0-9a-z]-?){1,100}-[0-9a-z]{10})$/.exec(gatewayArn)
++        : null;
++      const targetMatch = typeof gatewayTarget === "string" ? /^(?:[0-9a-zA-Z]-?){1,100}$/.exec(gatewayTarget) : null;
++      if (!gatewayMatch || gatewayMatch[0] !== gatewayArn || gatewayMatch[2] !== this.region || gatewayMatch[3] !== this.account ||
++          (gatewayMatch[1] === "aws-cn") !== this.region.startsWith("cn-") ||
++          (gatewayMatch[1] === "aws-us-gov") !== this.region.startsWith("us-gov-") ||
++          !targetMatch || targetMatch[0] !== gatewayTarget || props.contentSecurityPolicy) {
++        throw new Error("Invalid Context Manager gateway configuration");
++      }
++    }
++
+     const runtimeConfig = buildRuntimeConfig({
+       region: this.region,
+       stage: this.envName,
+       authority,
+       clientId,
+       apiEndpoint,
+-      serveRuntimeArn: props.serveRuntimeArn,
++      ...(props.serveRuntimeArn && {
++        serveGatewayArn: gatewayArn,
++        serveGatewayTarget: gatewayTarget,
++        serveGatewayAccount: this.account,
++      }),
+       mcpRuntimeArn,
+       version: readRepoVersion(),
+       graphSourcesEnabled: graphSourcesEnabled(this.node),
+--- a/infra/test/constructs/public-ui-csp.test.ts
++++ b/infra/test/constructs/public-ui-csp.test.ts
+@@ -160,11 +160,10 @@
+     expect(csp["connect-src"]).not.toContain("https:");
+   });
+ 
+-  it("falls back to scheme-level connect-src before endpoints are wired", () => {
+-    const csp = parse(buildContentSecurityPolicy(baseConfig)); // no api
+-    expect(csp["connect-src"]).toEqual(
+-      expect.arrayContaining(["'self'", "https:"]),
+-    );
++  it("does not allow arbitrary HTTPS origins before endpoints are wired", () => {
++    const csp = parse(buildContentSecurityPolicy(baseConfig));
++    expect(csp["connect-src"]).toContain("'self'");
++    expect(csp["connect-src"]).not.toContain("https:");
+   });
+ 
+   it("allows the OIDC authority in frame-src for silent renew", () => {
+@@ -175,6 +174,18 @@
+         "https://cognito-idp.us-east-1.amazonaws.com",
+       ]),
+     );
++  });
++
++  it("allows only the configured gateway origin for queries", () => {
++    const csp = parse(buildContentSecurityPolicy({
++      ...baseConfig,
++      serveGatewayArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++      serveGatewayTarget: "ContextManager",
++      serveGatewayAccount: "123456789012",
++    }));
++    expect(csp["connect-src"]).toContain("https://tc-0123456789.gateway.bedrock-agentcore.us-east-1.amazonaws.com");
++    expect(csp["connect-src"]).not.toContain("https://bedrock-agentcore.us-east-1.amazonaws.com");
++    expect(csp["connect-src"]).not.toContain("https:");
+   });
+ 
+   it("returns the caller override verbatim when provided", () => {
+@@ -186,8 +197,7 @@
+     const csp = parse(
+       buildContentSecurityPolicy({ ...baseConfig, apiEndpoint: "not a url" }),
+     );
+-    // apiEndpoint unusable → treated as not-wired → scheme fallback present.
+-    expect(csp["connect-src"]).toContain("https:");
++    expect(csp["connect-src"]).not.toContain("https:");
+   });
+ });
+ 
+--- a/infra/test/foundation/web-stack.test.ts
++++ b/infra/test/foundation/web-stack.test.ts
+@@ -528,5 +528,47 @@
+     );
+ 
+     expect(cspOf(template)).toBe(custom);
++  });
++});
++
++
++describe("WebStack - gateway routing", () => {
++  const gateway = "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789";
++  const runtime = "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/cm-0123456789";
++  const context = { resource_prefix: DEFAULT_RESOURCE_PREFIX, env: "dev", team_context_gateway_arn: gateway, team_context_gateway_target: "ContextManager" };
++
++  function synth(overrides: Record<string, unknown> = {}, customPolicy?: string): Template {
++    const app = new cdk.App({ context: { ...context, ...overrides } });
++    return Template.fromStack(new WebStack(app, "GatewayWeb", {
++      ...BASE_PROPS, env: { account: "123456789012", region: "us-east-1" },
++      serveRuntimeArn: runtime, contentSecurityPolicy: customPolicy,
++    }));
++  }
++
++  test("passes configured gateway settings to runtime config without a direct ARN", () => {
++    const cfg = buildRuntimeConfig({
++      region: "us-east-1", stage: "dev", authority: "https://example.test", clientId: "id",
++      serveGatewayArn: gateway, serveGatewayTarget: "ContextManager", serveGatewayAccount: "123456789012",
++    });
++    expect(cfg).toMatchObject({ serveGatewayArn: gateway, serveGatewayTarget: "ContextManager", serveGatewayAccount: "123456789012" });
++    expect(cfg).not.toHaveProperty("serveRuntimeArn");
++    expect(() => synth()).not.toThrow();
+   });
++
++  test.each([
++    { team_context_gateway_arn: undefined },
++    { team_context_gateway_arn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/*" },
++    { team_context_gateway_arn: "arn:aws:bedrock-agentcore:us-west-2:123456789012:gateway/tc-0123456789" },
++    { team_context_gateway_arn: "arn:aws:bedrock-agentcore:us-east-1:999999999999:gateway/tc-0123456789" },
++    { team_context_gateway_arn: gateway + "\n" },
++    { team_context_gateway_target: "../escape" },
++    { team_context_gateway_target: "ContextManager\n" },
++    { team_context_gateway_target: undefined },
++  ])("rejects invalid gateway settings %o", (overrides) => {
++    expect(() => synth(overrides)).toThrow("Invalid Context Manager gateway configuration");
++  });
++
++  test("rejects custom CSP for a gateway-enabled runtime", () => {
++    expect(() => synth({}, "connect-src https:")).toThrow("Invalid Context Manager gateway configuration");
++  });
+ });
+--- a/libs/ts-shared/src/types.ts
++++ b/libs/ts-shared/src/types.ts
+@@ -20,6 +20,9 @@
+   readonly apiEndpoint?: string;
+   /** AgentCore Runtime ARN for SSE streaming queries. Frontend constructs the invocations URL. */
+   readonly serveRuntimeArn?: string;
++  readonly serveGatewayArn?: string;
++  readonly serveGatewayTarget?: string;
++  readonly serveGatewayAccount?: string;
+   /** AgentCore Runtime ARN for the MCP Server. Frontend derives the MCP endpoint URL from this + region. */
+   readonly mcpRuntimeArn?: string;
+   /** Monorepo version (repo-root VERSION file) surfaced in the UI. E.g. "0.2.2". */
+--- a/packages/web-app/src/api-hooks/use-playground-stream.ts
++++ b/packages/web-app/src/api-hooks/use-playground-stream.ts
+@@ -106,6 +106,7 @@
+       try {
+         const response = await fetch(queryEndpoint, {
+           method: "POST",
++          redirect: "error",
+           headers: {
+             Authorization: `Bearer ${token}`,
+             "Content-Type": "application/json",
+--- a/packages/web-app/src/components/RuntimeContext/index.tsx
++++ b/packages/web-app/src/components/RuntimeContext/index.tsx
+@@ -19,6 +19,9 @@
+   readonly apiEndpoint?: string;
+   /** AgentCore Runtime ARN. Frontend builds the invocations URL from this + region. */
+   readonly serveRuntimeArn?: string;
++  readonly serveGatewayArn?: string;
++  readonly serveGatewayTarget?: string;
++  readonly serveGatewayAccount?: string;
+   /** MCP Server AgentCore Runtime ARN. Frontend builds the MCP endpoint URL from this + region. */
+   readonly mcpRuntimeArn?: string;
+   /** Monorepo version (from VERSION), rendered as a badge in the UI. */
+--- a/packages/web-app/src/pages/Playground.tsx
++++ b/packages/web-app/src/pages/Playground.tsx
+@@ -236,10 +236,10 @@
+         {t("Playground")}
+       </Header>
+ 
+-      {!runtimeContext?.serveRuntimeArn && (
++      {!buildQueryEndpoint(runtimeContext) && (
+         <StatusIndicator type="warning">
+           {t(
+-            "Query endpoint not configured. Add serveRuntimeArn to runtime-config.json.",
++            "Query gateway is not configured in runtime-config.json.",
+           )}
+         </StatusIndicator>
+       )}
+--- a/packages/web-app/src/utils/build-query-endpoint.ts
++++ b/packages/web-app/src/utils/build-query-endpoint.ts
+@@ -1,19 +1,20 @@
+ // Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
+ // SPDX-License-Identifier: Apache-2.0
+ 
+-/** Build the AgentCore /invocations URL from runtime ARN + region.
+- *
+- * AgentCore Runtime exposes a single POST /invocations endpoint. The URL is
+- * derived from the runtime ARN (stored in runtime-config.json) plus the
+- * deployment region. Returns undefined if the ARN is missing or the region
+- * format is invalid (prevents URL injection via tampered config).
+- */
++/** Construct only the configured same-account, same-Region Gateway target. */
+ export function buildQueryEndpoint(
+-  ctx: { region: string; serveRuntimeArn?: string } | undefined,
++  ctx: {
++    region: string;
++    serveGatewayArn?: string;
++    serveGatewayTarget?: string;
++    serveGatewayAccount?: string;
++  } | undefined,
+ ): string | undefined {
+-  if (!ctx?.serveRuntimeArn) return undefined;
+-  // Validate region format to prevent URL injection via tampered config
+-  if (!/^[a-z]{2}-[a-z]+-\d+$/.test(ctx.region)) return undefined;
+-  const encoded = encodeURIComponent(ctx.serveRuntimeArn);
+-  return `https://bedrock-agentcore.${ctx.region}.amazonaws.com/runtimes/${encoded}/invocations?qualifier=DEFAULT`;
++  if (!ctx || typeof ctx.serveGatewayArn !== "string" || typeof ctx.serveGatewayTarget !== "string") return undefined;
++  const arn = /^arn:(aws|aws-cn|aws-us-gov):bedrock-agentcore:([a-z0-9-]+):([0-9]{12}):gateway\/((?:[0-9a-z]-?){1,100}-[0-9a-z]{10})$/.exec(ctx.serveGatewayArn);
++  const target = /^(?:[0-9a-zA-Z]-?){1,100}$/.exec(ctx.serveGatewayTarget);
++  if (!arn || arn[0] !== ctx.serveGatewayArn || !/^[a-z]{2}(?:-gov)?-[a-z]+-[0-9]+$/.test(ctx.region) || arn[2] !== ctx.region || arn[3] !== ctx.serveGatewayAccount || !target || target[0] !== ctx.serveGatewayTarget) return undefined;
++  if ((arn[1] === "aws-cn") !== ctx.region.startsWith("cn-") || (arn[1] === "aws-us-gov") !== ctx.region.startsWith("us-gov-")) return undefined;
++  const suffix = arn[1] === "aws-cn" ? "amazonaws.com.cn" : "amazonaws.com";
++  return `https://${arn[4]}.gateway.bedrock-agentcore.${ctx.region}.${suffix}/${ctx.serveGatewayTarget}/invocations`;
+ }
+--- a/packages/web-app/src/utils/invoke-agentcore.ts
++++ b/packages/web-app/src/utils/invoke-agentcore.ts
+@@ -64,6 +64,7 @@
+     try {
+       response = await fetch(queryEndpoint, {
+         method: "POST",
++        redirect: "error",
+         headers: {
+           Authorization: `Bearer ${token}`,
+           "Content-Type": "application/json",
+--- a/packages/web-app/tests/unit/pages/Playground.test.tsx
++++ b/packages/web-app/tests/unit/pages/Playground.test.tsx
+@@ -10,8 +10,10 @@
+ vi.mock("../../../src/components/RuntimeContext", () => ({
+   RuntimeConfigContext: React.createContext({
+     region: "us-east-1",
+-    serveRuntimeArn:
+-      "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/test",
++    serveGatewayArn:
++      "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/tc-0123456789",
++    serveGatewayTarget: "ContextManager",
++    serveGatewayAccount: "123456789012",
+     oidcConfig: { authority: "https://mock", clientId: "c" },
+   }),
+ }));
+--- /dev/null
++++ b/packages/web-app/tests/unit/utils/build-query-endpoint.test.ts
+@@ -0,0 +1,27 @@
++// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++import { describe, expect, it } from "vitest";
++import { buildQueryEndpoint } from "@utils/build-query-endpoint";
++
++const valid = { region: "us-east-1", serveGatewayArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:gateway/team-0123456789", serveGatewayAccount: "123456789012", serveGatewayTarget: "query-target" };
++describe("Gateway query endpoint", () => {
++  it("constructs only the configured gateway target", () => {
++    expect(buildQueryEndpoint(valid)).toBe("https://team-0123456789.gateway.bedrock-agentcore.us-east-1.amazonaws.com/query-target/invocations");
++  });
++  it("uses the China partition suffix", () => {
++    expect(buildQueryEndpoint({ ...valid, region: "cn-north-1", serveGatewayArn: "arn:aws-cn:bedrock-agentcore:cn-north-1:123456789012:gateway/team-0123456789" })).toBe("https://team-0123456789.gateway.bedrock-agentcore.cn-north-1.amazonaws.com.cn/query-target/invocations");
++  });
++  it.each([
++    undefined,
++    { region: "us-east-1", serveRuntimeArn: "arn:aws:bedrock-agentcore:us-east-1:123456789012:runtime/legacy" },
++    { ...valid, serveGatewayArn: undefined },
++    { ...valid, serveGatewayAccount: "999999999999" },
++    { ...valid, region: "us-west-2" },
++    { ...valid, serveGatewayTarget: "evil/path" },
++    { ...valid, serveGatewayTarget: "query-target\n" },
++    { ...valid, serveGatewayArn: valid.serveGatewayArn + "\n" },
++    { ...valid, serveGatewayArn: valid.serveGatewayArn.replace("arn:aws:", "arn:aws-cn:") },
++  ])("rejects invalid configuration %#", (config) => {
++    expect(buildQueryEndpoint(config)).toBeUndefined();
++  });
++});
+--- /dev/null
++++ b/packages/web-app/tests/unit/utils/gateway-requests.test.tsx
+@@ -0,0 +1,26 @@
++// Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
++// SPDX-License-Identifier: Apache-2.0
++import { act, renderHook } from "@testing-library/react";
++import { afterEach, describe, expect, it, vi } from "vitest";
++import { invokeAgentCore } from "@utils/invoke-agentcore";
++import { usePlaygroundStream } from "../../../src/api-hooks/use-playground-stream";
++
++vi.mock("@auth", () => ({ OIDCProvider: { build: () => ({ getIdToken: async () => "test-token", getUser: async () => ({ profile: { sub: "user-123" } }) }) } }));
++const endpoint = "https://gateway.example.test/query/invocations";
++const oidcConfig = { authority: "https://idp.example.test", clientId: "client" };
++afterEach(() => vi.unstubAllGlobals());
++describe("Gateway requests", () => {
++  it("sends session and caller token without following redirects in the shared client", async () => {
++    const fetchMock = vi.fn().mockResolvedValue(new Response('data: {"ok":true}\n\n', { status: 200 }));
++    vi.stubGlobal("fetch", fetchMock);
++    expect(await invokeAgentCore({ queryEndpoint: endpoint, oidcConfig, payload: { query: "hello" } })).toEqual({ ok: true });
++    expect(fetchMock).toHaveBeenCalledWith(endpoint, expect.objectContaining({ redirect: "error", headers: expect.objectContaining({ Authorization: "Bearer test-token", "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": expect.any(String) }) }));
++  });
++  it("sends session and caller token without following redirects in the streaming client", async () => {
++    const fetchMock = vi.fn().mockResolvedValue(new Response("", { status: 200 }));
++    vi.stubGlobal("fetch", fetchMock);
++    const { result } = renderHook(() => usePlaygroundStream({ queryEndpoint: endpoint, oidcConfig, onEvent: vi.fn() }));
++    await act(async () => { await result.current.submit({ query: "hello", namespace: "default", requestId: "r1" }); });
++    expect(fetchMock).toHaveBeenCalledWith(endpoint, expect.objectContaining({ redirect: "error", headers: expect.objectContaining({ Authorization: "Bearer test-token", "X-Amzn-Bedrock-AgentCore-Runtime-Session-Id": expect.any(String) }) }));
++  });
++});
