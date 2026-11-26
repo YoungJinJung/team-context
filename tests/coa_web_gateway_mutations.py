@@ -59,7 +59,7 @@ def run(checkout):
             target.write_text(original.replace(old, new))
             is_infra = relative in (STACK, CSP)
             result = subprocess.run(jest if is_infra else vitest, cwd=root / ('infra' if is_infra else 'packages/web-app'), env=env, capture_output=True, text=True)
-            output = result.stdout + result.stderr
+            output = re.sub(r'\x1b\[[0-9;]*m', '', result.stdout + result.stderr)
             failed = re.search(r'Tests:\s+\d+ failed' if is_infra else r'Tests\s+\d+ failed', output)
             if result.returncode != 1 or not failed:
                 raise RuntimeError(f'Mutation {name} was not caught by a test assertion:\n{output}')
