@@ -13,7 +13,7 @@ uv run --no-sync python init_local.py
 uv run --no-sync python app.py
 ```
 
-브라우저에서 `http://127.0.0.1:8765`를 엽니다. 에뮬레이터는 `127.0.0.1:4568`에 바인딩하고 S3, DynamoDB, Secrets Manager를 제공합니다. `init_local.py`는 필요한 리소스를 생성하며 기존 데이터를 유지합니다. 이 구성에는 Neptune이나 OpenSearch 에뮬레이터가 없고 실제 AWS 리소스도 생성하지 않습니다.
+브라우저에서 `http://127.0.0.1:8765`를 엽니다. 에뮬레이터는 `127.0.0.1:4568`에 바인딩하고 S3, DynamoDB, Secrets Manager, KMS를 제공합니다. 계정 연결 상태 테스트는 임시 DynamoDB 테이블과 KMS 키를 생성하고 정리합니다. `init_local.py`는 필요한 리소스를 생성하며 기존 데이터를 유지합니다. 이 구성에는 Neptune이나 OpenSearch 에뮬레이터가 없고 실제 AWS 리소스도 생성하지 않습니다.
 
 개발이 끝나면 `docker compose down`으로 컨테이너를 종료합니다. 데이터 볼륨은 남습니다. `docker compose down -v`는 해당 볼륨의 데이터를 삭제하므로 필요할 때만 실행하세요.
 
@@ -30,6 +30,7 @@ TEAM_CONTEXT_INTEGRATION=1 uv run --no-sync pytest -q tests/test_localstack.py
 python3 -c "import shutil; shutil.rmtree('mutants', ignore_errors=True)"
 uv run --no-sync mutmut run --max-children 4
 uv run --no-sync mutmut run --max-children 2 'auth.coa_identity.*'
+uv run --no-sync mutmut run --max-children 2 'auth.link_attempts.*'
 uv run --no-sync mutmut export-cicd-stats
 uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
 ```

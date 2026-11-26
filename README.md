@@ -40,7 +40,7 @@ uv run --no-sync python app.py
 
 Open **http://127.0.0.1:8765**. Enter a GitHub repository as `owner/repository` or a GitLab project as `group/project`. Anonymous source API rate limits apply.
 
-LocalStack listens on `127.0.0.1:4568` and emulates S3, DynamoDB, and Secrets Manager. It does not create AWS resources or emulate Neptune and OpenSearch. `init_local.py` creates the required local resources without clearing existing data.
+LocalStack listens on `127.0.0.1:4568` and emulates S3, DynamoDB, Secrets Manager, and KMS. It does not create AWS resources or emulate Neptune and OpenSearch. `init_local.py` creates the required local resources without clearing existing data.
 
 To stop the emulator, run `docker compose down`. The data volume remains. `docker compose down -v` also deletes that volume and its data.
 
@@ -127,6 +127,7 @@ TEAM_CONTEXT_INTEGRATION=1 uv run --no-sync pytest -q tests/test_localstack.py
 python3 -c "import shutil; shutil.rmtree('mutants', ignore_errors=True)"
 uv run --no-sync mutmut run --max-children 4
 uv run --no-sync mutmut run --max-children 2 'auth.coa_identity.*'
+uv run --no-sync mutmut run --max-children 2 'auth.link_attempts.*'
 uv run --no-sync mutmut export-cicd-stats
 uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
 ```

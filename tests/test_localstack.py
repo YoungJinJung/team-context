@@ -479,3 +479,39 @@ def test_github_operator_cleanup_keeps_gitlab_and_public_records():
         private_snapshots.remove(identifier,'github')
     finally:
         for key in (github_key,gitlab_key,public_key): s3.delete_object(Bucket='team-context-records',Key=key)
+
+
+def test_link_attempts_use_kms_and_one_use_dynamodb_condition():
+    from concurrent.futures import ThreadPoolExecutor
+    from unittest.mock import Mock
+    from urllib.parse import parse_qs, urlsplit
+    from uuid import uuid4
+    import boto3
+    pytest.importorskip('coa_common')
+    from auth.coa_identity import Principal
+    from auth.link_attempts import LinkAttempts, _digest
+    initialize()
+    opts={'endpoint_url':'http://127.0.0.1:4568','region_name':'us-east-1','aws_access_key_id':'local','aws_secret_access_key':'local'}
+    db=boto3.client('dynamodb',**opts);kms=boto3.client('kms',**opts)
+    table='tc-link-test-'+uuid4().hex
+    db.create_table(TableName=table,KeySchema=[{'AttributeName':'state_key','KeyType':'HASH'}],AttributeDefinitions=[{'AttributeName':'state_key','AttributeType':'S'}],BillingMode='PAY_PER_REQUEST')
+    key=kms.create_key(Description='fake test key')['KeyMetadata']['KeyId']
+    verifier=Mock();verifier.verify.return_value=Principal('https://example.test','subject-a')
+    store=LinkAttempts(verifier,db,kms,table,key,{'github':('client-id','https://link.example/oauth/github/callback')})
+    try:
+        result=store.start('Bearer fake','github')
+        state=parse_qs(urlsplit(result.url).query)['state'][0]
+        row=db.get_item(TableName=table,Key={'state_key':{'S':_digest('github:'+state)}},ConsistentRead=True)['Item']
+        assert state not in repr(row) and result.browser_nonce not in repr(row) and 'subject-a' not in repr(row)
+        with pytest.raises(ValueError): store.consume('Bearer fake','github',state,'x'*43)
+        assert 'Item' in db.get_item(TableName=table,Key={'state_key':{'S':_digest('github:'+state)}},ConsistentRead=True)
+        def consume(_):
+            try: return store.consume('Bearer fake','github',state,result.browser_nonce)
+            except ValueError: return None
+        with ThreadPoolExecutor(max_workers=4) as pool: results=list(pool.map(consume,range(8)))
+        assert sum(value is not None for value in results)==1
+        assert next(value for value in results if value is not None).principal.subject=='subject-a'
+        assert 'Item' not in db.get_item(TableName=table,Key={'state_key':{'S':_digest('github:'+state)}},ConsistentRead=True)
+    finally:
+        db.delete_table(TableName=table)
+        kms.schedule_key_deletion(KeyId=key,PendingWindowInDays=7)
