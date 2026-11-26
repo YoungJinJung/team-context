@@ -32,6 +32,7 @@ uv run --no-sync mutmut run --max-children 4
 uv run --no-sync mutmut run --max-children 2 'auth.coa_identity.*'
 uv run --no-sync mutmut run --max-children 2 'auth.link_attempts.*'
 uv run --no-sync mutmut run --max-children 2 'auth.link_completion.*'
+uv run --no-sync mutmut run --max-children 2 'auth.source_credentials.*'
 uv run --no-sync mutmut export-cicd-stats
 uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
 ```
@@ -43,6 +44,8 @@ uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
 공급자 OAuth 앱 등록과 환경 변수는 [README의 OAuth 연결 안내](../README.md#connect-an-oauth-app)을 참고하세요. 개인 API 토큰을 입력하는 흐름은 제공하지 않습니다. GitHub App의 앱 비밀처럼 공급자가 요구하는 앱 자격증명은 서버에서 다루며 브라우저나 로그로 내보내지 않습니다. 현재 비밀 저장은 LocalStack이므로 실제 자격증명을 넣지 말고 테스트용 가짜 값과 모의 공급자 응답을 사용하세요.
 
 COA 인증과 계정 연결 모듈은 HTTP 엔드포인트나 MCP에 연결되지 않은 내부 구성요소입니다. 연결 완료 시 사용자와 공급자별 비밀을 KMS로 암호화하는 Secrets Manager에 저장합니다. 연결 해제는 저장된 비밀만 삭제하며 공급자의 권한 취소나 수집 데이터 삭제를 수행하지 않습니다. 운영 연동에는 사용자별 원본 권한 재검증과 데이터 삭제 전파가 필요합니다.
+
+내부 자격 증명 조회는 매 요청에서 COA 신원을 검증하고 사용자와 공급자가 일치하는 만료 전 토큰만 반환합니다. 이 값은 내부 코드 전용이며 로그나 HTTP·MCP 응답에 포함하면 안 됩니다. 토큰 갱신과 원본 접근 권한 검증은 아직 구현하지 않았습니다.
 
 로컬 GitLab 비공개 스냅샷 목록·삭제 명령도 README에 있습니다. 이 명령은 로컬 운영자용이며, 운영 환경의 관리자 권한 또는 보존 정책을 대신하지 않습니다.
 

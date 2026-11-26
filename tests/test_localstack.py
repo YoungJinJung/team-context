@@ -529,6 +529,7 @@ def test_link_completion_is_bound_to_identity_and_uses_kms_secrets():
     from auth.coa_identity import Principal
     from auth.link_attempts import LinkAttempts
     from auth.link_completion import LinkCompletion, _secret_name
+    from auth.source_credentials import SourceCredentials
 
     opts={'endpoint_url':'http://127.0.0.1:4568','region_name':'us-east-1','aws_access_key_id':'local','aws_secret_access_key':'local'}
     db=boto3.client('dynamodb',**opts);kms=boto3.client('kms',**opts);secrets=boto3.client('secretsmanager',**opts)
@@ -551,10 +552,14 @@ def test_link_completion_is_bound_to_identity_and_uses_kms_secrets():
         stored=secrets.get_secret_value(SecretId=name)
         assert json.loads(stored['SecretString'])['subject']=='alice'
         assert secrets.describe_secret(SecretId=name)['KmsKeyId']==key
+        resolver=SourceCredentials(verifier,secrets,prefix)
+        assert resolver.resolve('Bearer alice','gitlab').access_token=='fake-access'
+        with pytest.raises(ValueError): resolver.resolve('Bearer bob','gitlab')
         with pytest.raises(ValueError): service.complete('Bearer alice','gitlab',state,start.browser_nonce,'code')
         assert service.disconnect('Bearer bob','gitlab')=={'connected':False}
         assert secrets.get_secret_value(SecretId=name)['SecretString']==stored['SecretString']
         assert service.disconnect('Bearer alice','gitlab')=={'connected':False}
+        with pytest.raises(ValueError): resolver.resolve('Bearer alice','gitlab')
         with pytest.raises(ClientError): secrets.get_secret_value(SecretId=name)
     finally:
         try: secrets.delete_secret(SecretId=name,ForceDeleteWithoutRecovery=True)
