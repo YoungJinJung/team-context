@@ -10,7 +10,7 @@ The diagram is a **proposed AWS architecture**, not the current deployment. See 
 
 ## COA and private data
 
-[AWS Context Ontology Accelerator](https://github.com/aws/context-ontology-accelerator) has its own MCP server and OIDC/Cognito and Cedar authorization. Team Context's local MCP is a separate public-search prototype; this repository does not yet connect to COA. COA namespace permissions alone do not establish that a requester can access each original GitHub, GitLab, Jira, Confluence, or Teams item. Identity-to-connector binding, source permission checks, derived-data provenance, and deletion and revocation propagation remain open in [issue #68](https://github.com/YoungJinJung/team-context/issues/68). Do not use the prototype to serve company private data. An optional COA v0.3.11 identity-verification adapter exists for Python 3.12+, but it is not yet connected to account linking or the MCP server.
+[AWS Context Ontology Accelerator](https://github.com/aws/context-ontology-accelerator) has its own MCP server and OIDC/Cognito and Cedar authorization. Team Context's local MCP is a separate public-search prototype; this repository does not yet connect to COA. COA namespace permissions alone do not establish that a requester can access each original GitHub, GitLab, Jira, Confluence, or Teams item. Identity-to-connector binding, source permission checks, derived-data provenance, and deletion and revocation propagation remain open in [issue #68](https://github.com/YoungJinJung/team-context/issues/68). Do not use the prototype to serve company private data. Optional COA v0.3.11 identity-verification and account-linking components exist for Python 3.12+, but are not exposed through HTTP or connected to the MCP server. Disconnecting a stored binding does not revoke the provider grant or delete collected data.
 
 ## What works today
 
@@ -128,6 +128,7 @@ python3 -c "import shutil; shutil.rmtree('mutants', ignore_errors=True)"
 uv run --no-sync mutmut run --max-children 4
 uv run --no-sync mutmut run --max-children 2 'auth.coa_identity.*'
 uv run --no-sync mutmut run --max-children 2 'auth.link_attempts.*'
+uv run --no-sync mutmut run --max-children 2 'auth.link_completion.*'
 uv run --no-sync mutmut export-cicd-stats
 uv run --no-sync python scripts/check_mutation.py mutants/mutmut-cicd-stats.json
 ```
