@@ -12,14 +12,17 @@ from pathlib import Path
 import connectors
 from storage import persist, search, remove_public_source, cleanup_unavailable, list_public_sources
 from auth.sessions import Sessions
+from auth.providers import PROVIDERS
 from auth import linear_preview, teams, teams_preview, gitlab, gitlab_preview, gitlab_private, github, github_preview
 from botocore.exceptions import BotoCoreError, ClientError
 
 ROOT = Path(__file__).parent
-SESSIONS = Sessions()
-TEAMS_SESSIONS = Sessions(teams.Authorization, teams.refresh, "teams")
-GITLAB_SESSIONS = Sessions(gitlab.Authorization, gitlab.refresh, "gitlab")
-GITHUB_SESSIONS = Sessions(github.Authorization, github.refresh, "github")
+for provider in PROVIDERS.values():
+    if provider.id == "linear":
+        globals()[provider.session_name] = Sessions()
+    else:
+        module = importlib.import_module("auth." + provider.id.replace("-", "_"))
+        globals()[provider.session_name] = Sessions(module.Authorization, module.refresh, provider.namespace)
 STORAGE_LOCK = threading.Lock()
 CALLBACK = "http://127.0.0.1:8765/oauth/linear/callback"
 TEAMS_CALLBACK = "http://127.0.0.1:8765/oauth/teams/callback"
@@ -61,8 +64,76 @@ class Handler(BaseHTTPRequestHandler):
         except http.cookies.CookieError:
             return None
 
+    def oauth_status(self, provider):
+        if provider.id != "linear" and self.headers.get("Host") != "127.0.0.1:8765":
+            return self.send(403, {"error": "Invalid host"})
+        try:
+            return self.send(200, {"connected": globals()[provider.session_name].connected(self.cookie(provider.cookie))})
+        except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+            message = "Unable to read connection status" if provider.id == "linear" else f"Unable to load {provider.display_name} data"
+            return self.send(502, {"error": message})
+
+    def oauth_callback(self, provider, query):
+        if self.headers.get("Host") != "127.0.0.1:8765":
+            return self.send(403, {"error": "Invalid host"})
+        values = urllib.parse.parse_qs(query)
+        if len(values.get("state", [])) != 1 or len(values.get("code", [])) != 1:
+            return self.send(400, {"error": "Invalid callback"})
+        try:
+            globals()[provider.session_name].complete(self.cookie(provider.cookie), values["state"][0], values["code"][0])
+        except ValueError:
+            return self.send(400, {"error": "Invalid or expired authorization"})
+        except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
+            return self.send(502, {"error": "Authorization failed"})
+        self.send_response(303)
+        self.send_header("Location", "/")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    def oauth_manage(self, provider):
+        if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
+            return self.send(403, {"error": "Invalid origin"})
+        sessions = globals()[provider.session_name]
+        session = self.cookie(provider.cookie)
+        disconnect = self.path == f"/api/{provider.id}/disconnect"
+        try:
+            if disconnect:
+                sessions.disconnect(session)
+                return self.send(200, {"connected": False})
+            if sessions.connected(session):
+                return self.send(409, {"error": "Disconnect the existing connection first."})
+            client_id = os.environ.get(provider.client_env)
+            if not client_id or any(not os.environ.get(key) for key in provider.extra_env):
+                return self.send(503, {"error": provider.missing_config})
+            session, url = sessions.start(client_id, provider.callback)
+            parsed = urllib.parse.urlsplit(url)
+            if (parsed.scheme, parsed.netloc) != ("https", urllib.parse.urlsplit(provider.authorize_origin).netloc):
+                raise ValueError("Invalid authorization destination")
+        except ValueError:
+            return self.send(404, {"error": "No connection"})
+        except (OSError, BotoCoreError, ClientError):
+            if provider.id == "linear":
+                message = "Disconnect failed" if disconnect else "Unable to read connection status"
+            else:
+                message = f"Unable to manage {provider.display_name} connection"
+            return self.send(502, {"error": message})
+        body = json.dumps({"url": url}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("Set-Cookie", provider.cookie + "=" + session + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
     def do_GET(self):
         parsed = urllib.parse.urlsplit(self.path)
+        for provider in PROVIDERS.values():
+            if parsed.path == f"/oauth/{provider.id}/callback":
+                return self.oauth_callback(provider, parsed.query)
+            if parsed.path == f"/api/{provider.id}/status" and (provider.id != "linear" or self.path == parsed.path):
+                return self.oauth_status(provider)
         if parsed.path == "/api/gitlab/private/search":
             if self.headers.get("Host") != "127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid host"})
@@ -76,31 +147,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": "Private search unavailable"})
             except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
                 return self.send(502, {"error": "Unable to search private data"})
-        if parsed.path == "/oauth/github/callback":
-            if self.headers.get("Host") != "127.0.0.1:8765":
-                return self.send(403, {"error": "Invalid host"})
-            values = urllib.parse.parse_qs(parsed.query)
-            if len(values.get("state", [])) != 1 or len(values.get("code", [])) != 1:
-                return self.send(400, {"error": "Invalid callback"})
-            try:
-                GITHUB_SESSIONS.complete(self.cookie("team_context_github_session"), values["state"][0], values["code"][0])
-            except ValueError:
-                return self.send(400, {"error": "Invalid or expired authorization"})
-            except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
-                return self.send(502, {"error": "Authorization failed"})
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if parsed.path in ("/api/github/status", "/api/github/preview"):
+        if parsed.path == "/api/github/preview":
             if self.headers.get("Host") != "127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid host"})
             session = self.cookie("team_context_github_session")
             try:
-                if parsed.path == "/api/github/status":
-                    return self.send(200, {"connected": GITHUB_SESSIONS.connected(session)})
                 repository = urllib.parse.parse_qs(parsed.query).get("repository", [""])[0]
                 result = GITHUB_SESSIONS.use(session, lambda token: github_preview.pull_requests(token, repository))
                 return self.send(200, {"items": result})
@@ -108,31 +159,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": "GitHub preview unavailable"})
             except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
                 return self.send(502, {"error": "Unable to load GitHub data"})
-        if parsed.path == "/oauth/gitlab/callback":
-            if self.headers.get("Host") != "127.0.0.1:8765":
-                return self.send(403, {"error": "Invalid host"})
-            values = urllib.parse.parse_qs(parsed.query)
-            if len(values.get("state", [])) != 1 or len(values.get("code", [])) != 1:
-                return self.send(400, {"error": "Invalid callback"})
-            try:
-                GITLAB_SESSIONS.complete(self.cookie("team_context_gitlab_session"), values["state"][0], values["code"][0])
-            except ValueError:
-                return self.send(400, {"error": "Invalid or expired authorization"})
-            except (OSError, BotoCoreError, ClientError):
-                return self.send(502, {"error": "Authorization failed"})
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if parsed.path in ("/api/gitlab/status", "/api/gitlab/preview"):
+        if parsed.path == "/api/gitlab/preview":
             if self.headers.get("Host") != "127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid host"})
             session = self.cookie("team_context_gitlab_session")
             try:
-                if parsed.path == "/api/gitlab/status":
-                    return self.send(200, {"connected": GITLAB_SESSIONS.connected(session)})
                 project = urllib.parse.parse_qs(parsed.query).get("project", [""])[0]
                 result = GITLAB_SESSIONS.use(session, lambda token: gitlab_preview.merge_requests(token, project))
                 return self.send(200, {"items": result})
@@ -140,31 +171,11 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": "GitLab preview unavailable"})
             except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
                 return self.send(502, {"error": "Unable to load GitLab data"})
-        if parsed.path == "/oauth/teams/callback":
-            if self.headers.get("Host") != "127.0.0.1:8765":
-                return self.send(403, {"error": "Invalid host"})
-            values = urllib.parse.parse_qs(parsed.query)
-            if len(values.get("state", [])) != 1 or len(values.get("code", [])) != 1:
-                return self.send(400, {"error": "Invalid callback"})
-            try:
-                TEAMS_SESSIONS.complete(self.cookie("team_context_teams_session"), values["state"][0], values["code"][0])
-            except ValueError:
-                return self.send(400, {"error": "Invalid or expired authorization"})
-            except (OSError, BotoCoreError, ClientError):
-                return self.send(502, {"error": "Authorization failed"})
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
-        if parsed.path in ("/api/teams/status", "/api/teams/list", "/api/teams/channels"):
+        if parsed.path in ("/api/teams/list", "/api/teams/channels"):
             if self.headers.get("Host") != "127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid host"})
             session = self.cookie("team_context_teams_session")
             try:
-                if parsed.path == "/api/teams/status":
-                    return self.send(200, {"connected": TEAMS_SESSIONS.connected(session)})
                 if parsed.path == "/api/teams/list":
                     result = TEAMS_SESSIONS.use(session, teams_preview.teams)
                 else:
@@ -175,24 +186,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": "Teams preview unavailable"})
             except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
                 return self.send(502, {"error": "Unable to load Teams data"})
-        if parsed.path == "/oauth/linear/callback":
-            if self.headers.get("Host") != "127.0.0.1:8765":
-                return self.send(403, {"error": "Invalid host"})
-            values = urllib.parse.parse_qs(parsed.query)
-            if len(values.get("state", [])) != 1 or len(values.get("code", [])) != 1:
-                return self.send(400, {"error": "Invalid callback"})
-            try:
-                SESSIONS.complete(self.cookie(), values["state"][0], values["code"][0])
-            except ValueError:
-                return self.send(400, {"error": "Invalid or expired authorization"})
-            except (OSError, BotoCoreError, ClientError):
-                return self.send(502, {"error": "Authorization failed"})
-            self.send_response(303)
-            self.send_header("Location", "/")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", "0")
-            self.end_headers()
-            return
         if parsed.path == "/api/sources":
             if self.headers.get("Host") != "127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid host"})
@@ -222,11 +215,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": "Linear preview unavailable"})
             except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
                 return self.send(502, {"error": "Unable to load Linear data"})
-        if self.path == "/api/linear/status":
-            try:
-                return self.send(200, {"connected": SESSIONS.connected(self.cookie())})
-            except (OSError, BotoCoreError, ClientError):
-                return self.send(502, {"error": "Unable to read connection status"})
         if self.path == "/":
             return self.send(200, (ROOT / "index.html").read_bytes(), "text/html; charset=utf-8")
         if self.path == "/api/connectors":
@@ -234,6 +222,9 @@ class Handler(BaseHTTPRequestHandler):
         self.send(404, {"error": "Not found"})
 
     def do_POST(self):
+        for provider in PROVIDERS.values():
+            if self.path in (f"/api/{provider.id}/start", f"/api/{provider.id}/disconnect"):
+                return self.oauth_manage(provider)
         if self.path == "/api/gitlab/private/collect":
             if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid origin"})
@@ -251,87 +242,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(400, {"error": "Private collection unavailable"})
             except (OSError, BotoCoreError, ClientError, KeyError, TypeError):
                 return self.send(502, {"error": "Unable to collect private data"})
-        if self.path in ("/api/github/start", "/api/github/disconnect"):
-            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
-                return self.send(403, {"error": "Invalid origin"})
-            session = self.cookie("team_context_github_session")
-            try:
-                if self.path == "/api/github/disconnect":
-                    GITHUB_SESSIONS.disconnect(session)
-                    return self.send(200, {"connected": False})
-                if GITHUB_SESSIONS.connected(session):
-                    return self.send(409, {"error": "Disconnect the existing connection first."})
-                client_id = os.environ.get("GITHUB_CLIENT_ID")
-                if not client_id or not os.environ.get("GITHUB_APP_SECRET_ID"):
-                    return self.send(503, {"error": "Set GITHUB_CLIENT_ID and GITHUB_APP_SECRET_ID."})
-                session, url = GITHUB_SESSIONS.start(client_id, github.CALLBACK)
-            except ValueError:
-                return self.send(404, {"error": "No connection"})
-            except (OSError, BotoCoreError, ClientError):
-                return self.send(502, {"error": "Unable to manage GitHub connection"})
-            body = json.dumps({"url": url}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Set-Cookie", "team_context_github_session=" + session + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if self.path in ("/api/gitlab/start", "/api/gitlab/disconnect"):
-            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
-                return self.send(403, {"error": "Invalid origin"})
-            session = self.cookie("team_context_gitlab_session")
-            try:
-                if self.path == "/api/gitlab/disconnect":
-                    GITLAB_SESSIONS.disconnect(session)
-                    return self.send(200, {"connected": False})
-                if GITLAB_SESSIONS.connected(session):
-                    return self.send(409, {"error": "Disconnect the existing connection first."})
-                client_id = os.environ.get("GITLAB_CLIENT_ID")
-                if not client_id:
-                    return self.send(503, {"error": "Set GITLAB_CLIENT_ID to your GitLab OAuth app ID."})
-                session, url = GITLAB_SESSIONS.start(client_id, gitlab.CALLBACK)
-            except ValueError:
-                return self.send(404, {"error": "No connection"})
-            except (OSError, BotoCoreError, ClientError):
-                return self.send(502, {"error": "Unable to manage GitLab connection"})
-            body = json.dumps({"url": url}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Set-Cookie", "team_context_gitlab_session=" + session + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
-        if self.path in ("/api/teams/start", "/api/teams/disconnect"):
-            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
-                return self.send(403, {"error": "Invalid origin"})
-            session = self.cookie("team_context_teams_session")
-            try:
-                if self.path == "/api/teams/disconnect":
-                    TEAMS_SESSIONS.disconnect(session)
-                    return self.send(200, {"connected": False})
-                if TEAMS_SESSIONS.connected(session):
-                    return self.send(409, {"error": "Disconnect the existing connection first."})
-                client_id = os.environ.get("TEAMS_CLIENT_ID")
-                if not client_id:
-                    return self.send(503, {"error": "Set TEAMS_CLIENT_ID to your Entra app client ID."})
-                session, url = TEAMS_SESSIONS.start(client_id, TEAMS_CALLBACK)
-            except ValueError:
-                return self.send(404, {"error": "No connection"})
-            except (OSError, BotoCoreError, ClientError):
-                return self.send(502, {"error": "Unable to manage Teams connection"})
-            body = json.dumps({"url": url}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Set-Cookie", "team_context_teams_session=" + session + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
         if self.path == "/api/cleanup-unavailable":
             if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
                 return self.send(403, {"error": "Invalid origin"})
@@ -341,37 +251,6 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send(200, {"removed": count})
             except (OSError, BotoCoreError, ClientError, ValueError, KeyError, TypeError):
                 return self.send(502, {"error": "Unable to verify or clean local records"})
-        if self.path == "/api/linear/disconnect":
-            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
-                return self.send(403, {"error": "Invalid origin"})
-            try:
-                SESSIONS.disconnect(self.cookie())
-            except ValueError:
-                return self.send(404, {"error": "No connection"})
-            except (OSError, BotoCoreError, ClientError):
-                return self.send(502, {"error": "Disconnect failed"})
-            return self.send(200, {"connected": False})
-        if self.path == "/api/linear/start":
-            if self.headers.get("Host") != "127.0.0.1:8765" or self.headers.get("Origin") != "http://127.0.0.1:8765":
-                return self.send(403, {"error": "Invalid origin"})
-            try:
-                if SESSIONS.connected(self.cookie()):
-                    return self.send(409, {"error": "Disconnect the existing connection first."})
-            except (OSError, BotoCoreError, ClientError):
-                return self.send(502, {"error": "Unable to read connection status"})
-            client_id = os.environ.get("LINEAR_CLIENT_ID")
-            if not client_id:
-                return self.send(503, {"error": "Set LINEAR_CLIENT_ID to your Linear OAuth app client ID."})
-            session, url = SESSIONS.start(client_id, CALLBACK)
-            body = json.dumps({"url": url}).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.send_header("Cache-Control", "no-store")
-            self.send_header("Set-Cookie", "team_context_session=" + session + "; HttpOnly; SameSite=Lax; Path=/; Max-Age=2592000")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
-            return
         if self.path not in ("/api/collect", "/api/remove-source"):
             return self.send(404, {"error": "Not found"})
         if self.headers.get("Origin") not in (None, "http://127.0.0.1:8765", "http://localhost:8765"):

@@ -636,3 +636,81 @@ def test_private_gitlab_rejects_bad_request_and_hides_errors(client):
             use.side_effect=error
             response,data=request(client,'GET','/api/gitlab/private/search?project=a%2Fb&q=secret',headers=host)
             assert response.status == code and json.loads(data) == {'error':message}
+
+
+@pytest.mark.parametrize('provider,session_name,client_env,extra_env,origin', [
+    ('linear', 'SESSIONS', 'LINEAR_CLIENT_ID', {}, 'https://linear.app'),
+    ('teams', 'TEAMS_SESSIONS', 'TEAMS_CLIENT_ID', {}, 'https://login.microsoftonline.com'),
+    ('gitlab', 'GITLAB_SESSIONS', 'GITLAB_CLIENT_ID', {}, 'https://gitlab.com'),
+    ('github', 'GITHUB_SESSIONS', 'GITHUB_CLIENT_ID', {'GITHUB_APP_SECRET_ID': 'fake'}, 'https://github.com'),
+])
+def test_oauth_provider_rejects_untrusted_authorization_destination(client, provider, session_name, client_env, extra_env, origin):
+    headers = {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'}
+    with patch('app.' + session_name) as sessions, patch.dict('os.environ', {client_env: 'fake', **extra_env}):
+        sessions.connected.return_value = False
+        for url in ('https://attacker.example', 'http://' + origin.split('//')[1], origin + '@attacker.example'):
+            sessions.start.return_value = ('session', url)
+            response, data = request(client, 'POST', f'/api/{provider}/start', headers=headers)
+            assert response.status == 404 and b'attacker' not in data
+            assert response.getheader('Set-Cookie') is None
+
+
+def test_callback_rejects_another_providers_cookie(client):
+    from auth.sessions import Sessions
+    sessions = Sessions(app.github.Authorization, app.github.refresh, 'github')
+    headers = {'Host': '127.0.0.1:8765', 'Cookie': 'team_context_gitlab_session=' + 'a' * 43}
+    with patch('app.GITHUB_SESSIONS', sessions), patch('app.GITLAB_SESSIONS.complete') as gitlab_complete:
+        response, data = request(client, 'GET', '/oauth/github/callback?state=s&code=c', headers=headers)
+    assert response.status == 400 and json.loads(data) == {'error': 'Invalid or expired authorization'}
+    gitlab_complete.assert_not_called()
+
+
+def test_registered_provider_uses_shared_oauth_routes(client):
+    from dataclasses import replace
+    from auth.providers import PROVIDERS, register
+    from unittest.mock import Mock
+    provider = replace(PROVIDERS['gitlab'], id='example', cookie='team_context_example_session',
+                       namespace='example', session_name='EXAMPLE_SESSIONS', display_name='Example',
+                       client_env='EXAMPLE_CLIENT_ID', callback='http://127.0.0.1:8765/oauth/example/callback',
+                       authorize_origin='https://example.com')
+    sessions = Mock()
+    sessions.connected.return_value = False
+    sessions.start.return_value = ('safe-session', 'https://example.com/authorize')
+    headers = {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765'}
+    with patch('app.PROVIDERS', register([*PROVIDERS.values(), provider])), patch('app.EXAMPLE_SESSIONS', sessions, create=True), patch.dict('os.environ', {'EXAMPLE_CLIENT_ID': 'fake'}):
+        response, data = request(client, 'POST', '/api/example/start', headers=headers)
+        assert response.status == 200 and json.loads(data) == {'url': 'https://example.com/authorize'}
+        cookie = response.getheader('Set-Cookie')
+        assert cookie.startswith('team_context_example_session=safe-session;')
+        response, _ = request(client, 'GET', '/oauth/example/callback?state=state&code=code', headers={**headers, 'Cookie': cookie})
+        assert response.status == 303
+        sessions.complete.assert_called_once_with('safe-session', 'state', 'code')
+        response, data = request(client, 'GET', '/api/example/status', headers={**headers, 'Cookie': cookie})
+        assert response.status == 200 and json.loads(data) == {'connected': False}
+        response, _ = request(client, 'POST', '/api/example/disconnect', headers={**headers, 'Cookie': cookie})
+        assert response.status == 200
+        sessions.disconnect.assert_called_once_with('safe-session')
+
+
+@pytest.mark.parametrize('provider,session_name,cookie_name,client_env,extra_env', [
+    ('linear', 'SESSIONS', 'team_context_session', 'LINEAR_CLIENT_ID', {}),
+    ('teams', 'TEAMS_SESSIONS', 'team_context_teams_session', 'TEAMS_CLIENT_ID', {}),
+    ('gitlab', 'GITLAB_SESSIONS', 'team_context_gitlab_session', 'GITLAB_CLIENT_ID', {}),
+    ('github', 'GITHUB_SESSIONS', 'team_context_github_session', 'GITHUB_CLIENT_ID', {'GITHUB_APP_SECRET_ID': 'fake'}),
+])
+def test_start_checks_the_current_providers_session_before_replacement(client, provider, session_name, cookie_name, client_env, extra_env):
+    headers = {'Host': '127.0.0.1:8765', 'Origin': 'http://127.0.0.1:8765', 'Cookie': cookie_name + '=existing'}
+    with patch('app.' + session_name) as sessions, patch.dict('os.environ', {client_env: 'fake', **extra_env}):
+        sessions.connected.side_effect = lambda cookie: cookie == 'existing'
+        response, data = request(client, 'POST', f'/api/{provider}/start', headers=headers)
+        assert response.status == 409 and json.loads(data) == {'error': 'Disconnect the existing connection first.'}
+        sessions.connected.assert_called_once_with('existing')
+        sessions.start.assert_not_called()
+
+
+def test_namespaced_status_allows_query_but_linear_preserves_exact_path(client):
+    with patch('app.GITHUB_SESSIONS.connected', return_value=True):
+        response, data = request(client, 'GET', '/api/github/status?unused=1', headers={'Host': '127.0.0.1:8765'})
+        assert response.status == 200 and json.loads(data) == {'connected': True}
+    response, _ = request(client, 'GET', '/api/linear/status?unused=1')
+    assert response.status == 404
