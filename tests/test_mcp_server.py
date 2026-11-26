@@ -61,3 +61,12 @@ def test_valid_query_boundaries_and_missing_body():
         assert mcp_server.search_context('ab')['items'][0]['snippet'] == ''
         assert mcp_server.search_context('x'*100)['items'][0]['snippet'] == ''
         assert [call.args[0] for call in search.call_args_list] == ['ab', 'x'*100]
+
+
+def test_mcp_fails_closed_if_search_returns_any_nonpublic_record():
+    for record in ({**RECORD, 'visibility':'private'}, {**RECORD, 'visibility':'unknown'},
+                   {key:value for key,value in RECORD.items() if key != 'visibility'}, None):
+        with patch('mcp_server.search', return_value=[RECORD, record]):
+            result = mcp_server.search_context('query')
+        assert result == {'error':'Unable to search public sources'}
+        assert 'items' not in result

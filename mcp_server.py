@@ -11,6 +11,8 @@ def search_context(query: str) -> dict:
         return {'error': 'Search query must contain 2 to 100 characters'}
     try:
         records = search(query)
+        if not all(isinstance(record, dict) and record.get('visibility') == 'public' for record in records):
+            raise ValueError('Non-public record in public search')
         return {'items': [{'title': item['title'], 'url': item['url'],
                            'type': item['type'], 'updated_at': item['updated_at'],
                            'snippet': item.get('body', '')[:500]} for item in records]}
