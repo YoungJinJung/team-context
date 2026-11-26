@@ -42,3 +42,32 @@ jobs:
       - name: Stop local AWS emulator
         if: always()
         run: docker compose down -v
+  coa-lockdown:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: aws/context-ontology-accelerator
+          ref: 5dd33d7eb21d9af3de8fe4f03558eca992a4104a
+          path: coa-upstream
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+      - name: Apply pinned COA patch
+        run: git -C coa-upstream apply "$GITHUB_WORKSPACE/patches/coa-v0.3.11-gateway-only.patch"
+      - name: Install COA infrastructure dependencies
+        working-directory: coa-upstream
+        run: pnpm install --filter 'coa-infra...' --frozen-lockfile --ignore-scripts
+      - name: Build COA shared types
+        working-directory: coa-upstream
+        run: pnpm --filter @coa/shared build
+      - name: Test gateway-only CloudFormation synthesis
+        working-directory: coa-upstream
+        run: pnpm --filter coa-infra exec jest test/services/serve-stack.test.ts --runInBand --coverage=false --testNamePattern='ServeStack - gateway-only runtime'
+      - name: Test gateway restriction mutations
+        run: python3 tests/coa_gateway_patch_mutations.py coa-upstream

@@ -14,6 +14,8 @@ The diagram is a **proposed AWS architecture**, not the current deployment. See 
 
 The optional [runtime gateway check](docs/development.md#coa-런타임의-gateway-제한-확인) inspects an existing AgentCore Runtime's current configuration. It does not change access controls or verify that private retrieval is safe.
 
+An experimental [COA runtime gateway restriction patch](docs/coa-runtime-lockdown.md) is available for the pinned upstream release. It is not deployed, and a gateway with source authorization and other access controls are still required before private data can be used.
+
 ## What works today
 
 | Source | Available in the local prototype | Not available yet |
