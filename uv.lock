@@ -1336,12 +1336,14 @@ dependencies = [
 [package.optional-dependencies]
 mcp = [
     { name = "mcp" },
+    { name = "pyjwt", extra = ["crypto"] },
 ]
 
 [package.dev-dependencies]
 dev = [
     { name = "mcp" },
     { name = "mutmut" },
+    { name = "pyjwt", extra = ["crypto"] },
     { name = "pytest" },
 ]
 
@@ -1349,6 +1351,7 @@ dev = [
 requires-dist = [
     { name = "boto3", specifier = ">=1.35,<2" },
     { name = "mcp", marker = "extra == 'mcp'", specifier = ">=2,<3" },
+    { name = "pyjwt", extras = ["crypto"], marker = "extra == 'mcp'", specifier = ">=2.10,<3" },
 ]
 provides-extras = ["mcp"]
 
@@ -1356,6 +1359,7 @@ provides-extras = ["mcp"]
 dev = [
     { name = "mcp", specifier = ">=2,<3" },
     { name = "mutmut", specifier = ">=3.8,<4" },
+    { name = "pyjwt", extras = ["crypto"], specifier = ">=2.10,<3" },
     { name = "pytest", specifier = ">=8,<10" },
 ]
 
