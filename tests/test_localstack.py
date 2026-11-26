@@ -503,10 +503,10 @@ def test_link_attempts_use_kms_and_one_use_dynamodb_condition():
         state=parse_qs(urlsplit(result.url).query)['state'][0]
         row=db.get_item(TableName=table,Key={'state_key':{'S':_digest('github:'+state)}},ConsistentRead=True)['Item']
         assert state not in repr(row) and result.browser_nonce not in repr(row) and 'subject-a' not in repr(row)
-        with pytest.raises(ValueError): store.consume('github',state,'x'*43)
+        with pytest.raises(ValueError): store.consume('Bearer fake','github',state,'x'*43)
         assert 'Item' in db.get_item(TableName=table,Key={'state_key':{'S':_digest('github:'+state)}},ConsistentRead=True)
         def consume(_):
-            try: return store.consume('github',state,result.browser_nonce)
+            try: return store.consume('Bearer fake','github',state,result.browser_nonce)
             except ValueError: return None
         with ThreadPoolExecutor(max_workers=4) as pool: results=list(pool.map(consume,range(8)))
         assert sum(value is not None for value in results)==1

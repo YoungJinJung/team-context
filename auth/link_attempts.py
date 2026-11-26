@@ -85,7 +85,10 @@ class LinkAttempts:
             'expires_at': {'N': str(expires)}, 'ciphertext': {'B': ciphertext}}, ConditionExpression='attribute_not_exists(state_key)')
         return StartResult(oauth.url(), nonce)
 
-    def consume(self, provider, state, browser_nonce):
+    def consume(self, authorization, provider, state, browser_nonce):
+        principal = self._verifier.verify(authorization)
+        if not isinstance(principal, Principal) or not _nonempty(principal.issuer) or not _nonempty(principal.subject):
+            raise ValueError('Invalid or expired account link')
         if not isinstance(provider, str) or provider not in self._registrations or not _random_value(state) or not _random_value(browser_nonce):
             raise ValueError('Invalid or expired account link')
         state_key, nonce_key = _digest(provider + ':' + state), _digest(browser_nonce)
@@ -108,4 +111,6 @@ class LinkAttempts:
             raise ValueError('Invalid or expired account link')
         if not _nonempty(payload.get('issuer')) or not _nonempty(payload.get('subject')) or not isinstance(payload.get('verifier'), str) or not re.fullmatch(r'[A-Za-z0-9_-]{64}', payload['verifier']):
             raise ValueError('Invalid or expired account link')
-        return ConsumedAttempt(Principal(payload['issuer'], payload['subject']), provider, payload['client_id'], payload['redirect_uri'], payload['verifier'])
+        if Principal(payload['issuer'], payload['subject']) != principal:
+            raise ValueError('Invalid or expired account link')
+        return ConsumedAttempt(principal, provider, payload['client_id'], payload['redirect_uri'], payload['verifier'])
