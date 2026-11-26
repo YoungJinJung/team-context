@@ -725,14 +725,14 @@ def test_atlassian_site_preview_is_session_bound_and_not_persisted(client):
         assert response.status == 200 and json.loads(data)['items'][0]['name'] == 'Team'
         sessions.use.assert_called_once_with('own', app.atlassian_preview.sites)
         persist.assert_not_called()
-        response, _ = request(client, 'GET', '/api/atlassian/sites', headers={'Host':'evil.example'})
-        assert response.status == 403
+        response, data = request(client, 'GET', '/api/atlassian/sites', headers={'Host':'evil.example'})
+        assert response.status == 403 and json.loads(data) == {'error':'Invalid host'}
         sessions.use.side_effect = ValueError('private')
         response, data = request(client, 'GET', '/api/atlassian/sites', headers={'Host':'127.0.0.1:8765'})
-        assert response.status == 400 and b'private' not in data
+        assert response.status == 400 and json.loads(data) == {'error':'Atlassian preview unavailable'} and b'private' not in data
         sessions.use.side_effect = OSError('private')
         response, data = request(client, 'GET', '/api/atlassian/sites', headers={'Host':'127.0.0.1:8765'})
-        assert response.status == 502 and b'private' not in data
+        assert response.status == 502 and json.loads(data) == {'error':'Unable to load Atlassian data'} and b'private' not in data
 
 
 def test_atlassian_start_callback_status_disconnect_with_fake_credentials(client):
