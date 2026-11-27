@@ -23,6 +23,8 @@ git -C coa-review apply --check /absolute/path/to/team-context/patches/coa-v0.3.
 git -C coa-review apply /absolute/path/to/team-context/patches/coa-v0.3.11-disable-metrics.patch
 git -C coa-review apply --check /absolute/path/to/team-context/patches/coa-v0.3.11-disable-ontology-proxy.patch
 git -C coa-review apply /absolute/path/to/team-context/patches/coa-v0.3.11-disable-ontology-proxy.patch
+git -C coa-review apply --check /absolute/path/to/team-context/patches/coa-v0.3.11-require-jwt-subject.patch
+git -C coa-review apply /absolute/path/to/team-context/patches/coa-v0.3.11-require-jwt-subject.patch
 cd coa-review
 pnpm install --filter 'coa-infra...' --frozen-lockfile --ignore-scripts
 pnpm --filter @coa/shared build
@@ -33,10 +35,12 @@ pnpm --filter coa-infra exec jest test/services/data-layer-stack.test.ts --runIn
 
 When these patches are used in a purpose-built deployment, CDK must receive `team_context_gateway_arn` and `team_context_gateway_target` context values for an HTTP runtime target on a gateway in the runtime's account and Region. The MCP, data-layer, and web clients construct the gateway URL from those trusted settings, forward the caller's JWT, reject redirects, and do not fall back to direct runtime access. The MCP and web clients also forward their existing session headers. The gateway must permit the web origin through CORS and pass through the caller token and session header; these requirements still need a live deployment test. The gateway must be configured to forward the original user's JWT and to enforce source authorization before invoking the Context Manager. Route every legitimate Context Manager caller through an authenticated gateway with verified authorization before deploying the restriction. The [runtime gateway check](development.md#coa-런타임의-gateway-제한-확인) can inspect current endpoint versions afterwards, but cannot replace live direct-invocation tests or verify the other access paths.
 
-The COA integration CI applies all seven patches to the pinned upstream commit, checks the synthesized runtimes and client transports, and runs focused security mutations. It does not emulate AgentCore or deploy AWS resources. AWS documents the workload restriction and gateway target limitations in its [runtime authorization guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-oauth.html) and [runtime target guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-target-http-runtime.html).
+The COA integration CI applies all eight patches to the pinned upstream commit, checks the synthesized runtimes and client transports, and runs focused security mutations. It does not emulate AgentCore or deploy AWS resources. AWS documents the workload restriction and gateway target limitations in its [runtime authorization guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/runtime-oauth.html) and [runtime target guide](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-target-http-runtime.html).
 
 The schema lockdown deliberately disables schema discovery for all users. It does not block ontology download, metrics, direct Lambda invocation by other identities, storage access, or other COA APIs. A deployment must isolate and test each remaining path before admitting private data.
 
 The optional metric lockdown disables the entire metric REST Lambda and the MCP list_metrics tool for every user, including creation, updates and export. It removes MCP direct metric Lambda permissions. Background workers, other APIs, direct storage access and previously deployed runtimes remain separate access paths; none of these patches alone makes private data safe.
 
 The optional ontology proxy lockdown replaces the deployed proxy Lambda with a fixed 403 response. It removes that Lambda’s VPC connection and application permissions. All proxy-backed ontology, graph, embedding, induction and system-health routes stop working. It does not block direct ECS, database, object-store, other Lambda or older deployment access; these paths still need separate enforcement.
+
+The optional JWT subject patch requires a non-empty forwarded subject before initializing or dispatching a request, including session actions. It depends on AgentCore validating the token and forwarding the Authorization header; decoding a token in the runtime is not a substitute for signature verification. Local calls without a forwarded JWT are rejected. This is not source-level authorization.
