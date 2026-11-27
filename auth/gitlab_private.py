@@ -31,16 +31,20 @@ def _project(token, project):
     data = _get(token, 'projects/' + urllib.parse.quote(project, safe=''))
     if not isinstance(data, dict) or not _positive(data.get('id')):
         raise ValueError('Invalid project')
-    return data['id']
+    name = data.get('path_with_namespace')
+    connection_id({'project': name})
+    if any(part == '.' for part in name.split('/')):
+        raise ValueError('Invalid project')
+    return data['id'], name
 
 
-def _record(item, project_id):
+def _record(item, project_id, project):
     if not isinstance(item, dict) or not _positive(item.get('iid')) or item.get('project_id') != project_id or type(item.get('project_id')) is not int:
         raise ValueError('Invalid merge request')
     if not all(isinstance(item.get(field), str) for field in ('title', 'web_url', 'updated_at')) or 'description' not in item or not isinstance(item['description'], (str, type(None))):
         raise ValueError('Invalid merge request')
     parsed_url = urllib.parse.urlsplit(item['web_url'])
-    if parsed_url.scheme != 'https' or parsed_url.netloc != 'gitlab.com':
+    if parsed_url.scheme != 'https' or parsed_url.netloc != 'gitlab.com' or parsed_url.path != f"/{project}/-/merge_requests/{item['iid']}" or parsed_url.query or parsed_url.fragment or parsed_url.geturl() != item['web_url']:
         raise ValueError('Invalid merge request URL')
     return {'iid': item['iid'], 'project_id': project_id, 'title': item['title'], 'url': item['web_url'], 'updated_at': item['updated_at'], 'body': item.get('description') or ''}
 
@@ -52,7 +56,7 @@ def _key(project_id):
 
 
 def collect(token, project):
-    project_id = _project(token, project)
+    project_id, name = _project(token, project)
     records = []
     seen = set()
     for page in range(1, 12):
@@ -69,7 +73,7 @@ def collect(token, project):
         if page == 11:
             raise ValueError('Collection exceeds 10 pages')
         for item in batch:
-            record = _record(item, project_id)
+            record = _record(item, project_id, name)
             if record['iid'] in seen:
                 raise ValueError('Repeated merge request')
             seen.add(record['iid'])
@@ -80,7 +84,7 @@ def search(token, project, query):
     if not isinstance(query, str) or not 2 <= len(query.strip()) <= 100:
         raise ValueError('Invalid search query')
     query = query.strip().casefold()
-    project_id = _project(token, project)
+    project_id, name = _project(token, project)
     s3, _ = clients()
     try:
         with closing(s3.get_object(Bucket='team-context-records', Key=_key(project_id))['Body']) as stream:
@@ -101,7 +105,7 @@ def search(token, project, query):
         if query not in (record['title'] + ' ' + record['body']).casefold():
             continue
         try:
-            current = _record(_get(token, f"projects/{project_id}/merge_requests/{record['iid']}"), project_id)
+            current = _record(_get(token, f"projects/{project_id}/merge_requests/{record['iid']}"), project_id, name)
         except urllib.error.HTTPError as error:
             if error.code in (403, 404, 410):
                 continue
