@@ -188,3 +188,54 @@ def test_cognito_access_token_rejects_unexpected_client_even_with_matching_audie
     del payload['client_id']
     assert verify(configured(COGNITO, 'cognito'), private_key, payload) is None
     assert verify(configured(COGNITO, 'cognito'), private_key, {**payload, 'client_id': AUD, 'aud': 'https://resource.example'}) is None
+
+
+def test_resource_bound_cognito_access_token_requires_both_audience_and_client(private_key):
+    now = int(time.time())
+    resource = 'https://api.example.test/team-context'
+    client = 'cognitoClient123'
+    verifier = CoaIdentity(COGNITO, resource, 'us-east-1', SCOPE, 'cognito', True, client_id=client)
+    payload = {'iss': COGNITO, 'sub': 'cognito-user', 'aud': resource, 'client_id': client,
+               'token_use': 'access', 'username': 'user', 'scope': SCOPE, 'iat': now - 5, 'exp': now + 300}
+    assert verify(verifier, private_key, payload) == Principal(COGNITO, 'cognito-user')
+    for changes in ({'aud': 'https://other.example.test'}, {'aud': [resource]}, {'aud': None},
+                    {'client_id': 'wrong-client'}, {'client_id': None}, {'token_use': 'id'},
+                    {'scope': 'openid'}, {'username': ''}, {'exp': now - 1}):
+        assert verify(verifier, private_key, {**payload, **changes}) is None
+    for field in ('aud', 'client_id'):
+        missing = dict(payload)
+        del missing[field]
+        assert verify(verifier, private_key, missing) is None
+    attacker = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    with patch.object(verifier._authorizer, '_get_jwks', return_value=jwks(private_key)):
+        assert verifier.verify(signed(attacker, payload)) is None
+
+
+def test_resource_bound_mode_never_falls_back_from_missing_audience_to_client(private_key):
+    now = int(time.time())
+    client = 'cognitoClient123'
+    verifier = CoaIdentity(COGNITO, client, 'us-east-1', SCOPE, 'cognito', True, client_id=client)
+    payload = {'iss': COGNITO, 'sub': 'cognito-user', 'client_id': client, 'token_use': 'access',
+               'username': 'user', 'scope': SCOPE, 'iat': now - 5, 'exp': now + 300}
+    assert verify(verifier, private_key, payload) is None
+    assert verify(verifier, private_key, {**payload, 'aud': client}) == Principal(COGNITO, 'cognito-user')
+
+
+@pytest.mark.parametrize('client_id', ['', ' ', 'a' * 129, '../bad', 'bad\nclient', 123, [], {}])
+def test_resource_bound_mode_rejects_invalid_client_configuration(client_id):
+    with pytest.raises(ValueError, match='^Invalid authentication configuration$'):
+        CoaIdentity(COGNITO, 'https://api.example.test', 'us-east-1', SCOPE, 'cognito', True, client_id=client_id)
+
+
+def test_client_configuration_is_not_silently_ignored_for_entra():
+    with pytest.raises(ValueError, match='^Invalid authentication configuration$'):
+        CoaIdentity(ISSUER, AUD, 'us-east-1', SCOPE, 'entra', True, client_id='client123')
+
+
+@pytest.mark.parametrize('client_id', ['a', 'a' * 128, 'client_123+'])
+def test_resource_bound_mode_accepts_cognito_client_id_boundaries(private_key, client_id):
+    resource = 'https://api.example.test'
+    verifier = CoaIdentity(COGNITO, resource, 'us-east-1', SCOPE, 'cognito', True, client_id=client_id)
+    payload = {'iss': COGNITO, 'sub': 'cognito-user', 'aud': resource, 'client_id': client_id,
+               'token_use': 'access', 'username': 'user', 'scope': SCOPE, 'exp': int(time.time()) + 300}
+    assert verify(verifier, private_key, payload) == Principal(COGNITO, 'cognito-user')
