@@ -21,12 +21,15 @@ def _nonempty(value):
 class CoaIdentity:
     """Verify delegated user tokens using COA's configured token authorizer.
 
-    For Cognito, audience is the app client ID. Resource-bound tokens with a
-    different audience are denied until both values can be configured.
+    For resource-bound Cognito tokens, pass the resource URL as audience and
+    the app client ID as client_id. Without client_id, audience is the app
+    client ID and only the existing unbound behavior is supported.
     """
 
-    def __init__(self, issuer, audience, region, scope, mode, auth_enabled):
+    def __init__(self, issuer, audience, region, scope, mode, auth_enabled, *, client_id=None):
         if auth_enabled is not True or not all(_nonempty(value) for value in (issuer, audience, region, scope)) or len(scope.split()) != 1:
+            raise ValueError('Invalid authentication configuration')
+        if client_id is not None and (mode != 'cognito' or not isinstance(client_id, str) or not re.fullmatch(r'[A-Za-z0-9_+]{1,128}', client_id)):
             raise ValueError('Invalid authentication configuration')
         url = urlsplit(issuer)
         if url.scheme != 'https' or not url.hostname or url.username or url.password or url.port or url.query or url.fragment:
@@ -46,7 +49,8 @@ class CoaIdentity:
         else:
             raise ValueError('Invalid identity provider')
         self._issuer = issuer
-        self._client_id = audience if mode == 'cognito' else None
+        self._client_id = (client_id if client_id is not None else audience) if mode == 'cognito' else None
+        self._resource_audience = audience if client_id is not None else None
         self._scope = scope
         self._mode = mode
         self._authorizer = build_token_authorizer(issuer=issuer, region=region, client_id=audience)
@@ -74,7 +78,9 @@ class CoaIdentity:
                     return None
                 scopes = claims.get('scp')
             else:
-                if claims.get('token_use') != 'access' or claims.get('client_id') != self._client_id or not _nonempty(claims.get('username')):
+                if (claims.get('token_use') != 'access' or claims.get('client_id') != self._client_id
+                        or (self._resource_audience is not None and claims.get('aud') != self._resource_audience)
+                        or not _nonempty(claims.get('username'))):
                     return None
                 scopes = claims.get('scope')
             if not isinstance(scopes, str) or self._scope not in scopes.split():
