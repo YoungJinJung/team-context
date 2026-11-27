@@ -161,3 +161,17 @@ jobs:
         run: pnpm --filter coa-infra exec jest test/services/ontology-stack.test.ts --runInBand --coverage=false
       - name: Test ontology proxy lockdown mutations
         run: python3 tests/coa_ontology_lockdown_mutations.py coa-upstream
+      - name: Apply COA JWT subject restriction
+        run: git -C coa-upstream apply "$GITHUB_WORKSPACE/patches/coa-v0.3.11-require-jwt-subject.patch"
+      - name: Test COA runtime subject restriction
+        env:
+          PYTHONPATH: ${{ github.workspace }}/coa-upstream/packages/context-manager/src
+        run: |
+          uv run --no-sync --with 'pytest-asyncio>=0.23,<2' --with 'regex==2026.5.9' --with 'bedrock-agentcore==1.18.1' --with 'httpx>=0.27,<1' --with 'opensearch-py>=2.8,<4' --with 'requests-aws4auth>=1.3,<2' --with 'sqlglot>=25,<30' --with 'cedarpy>=4.8,<5' --with 'python-ulid>=3,<4' --with 'rdflib>=7,<8' --with 'sqlalchemy[asyncio]>=2,<3' --with 'asyncpg>=0.30,<1' --with 'aiomysql>=0.2,<1' --with 'python-tds>=1.15,<2' --with 'strands-agents>=1.48,<2' --with 'retryhttp>=1.4,<2' pytest -q \
+            coa-upstream/packages/context-manager/tests/unit/test_main.py \
+            coa-upstream/packages/context-manager/tests/unit/test_auth.py \
+            coa-upstream/packages/context-manager/tests/unit/test_session_actions.py \
+            coa-upstream/packages/context-manager/tests/unit/test_authz_invariants.py \
+            coa-upstream/packages/context-manager/tests/unit/test_jwt_subject_gate.py
+      - name: Test JWT subject restriction mutations
+        run: python3 tests/coa_jwt_subject_mutations.py coa-upstream

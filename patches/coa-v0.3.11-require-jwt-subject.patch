@@ -1,0 +1,226 @@
+diff --git a/packages/context-manager/src/coa_serve/main.py b/packages/context-manager/src/coa_serve/main.py
+index ddf05b8..cefe2de 100644
+--- a/packages/context-manager/src/coa_serve/main.py
++++ b/packages/context-manager/src/coa_serve/main.py
+@@ -1330,7 +1330,19 @@ async def invoke(payload: dict, context=None):
+ 
+     Health checks use the built-in GET /ping endpoint per AgentCore protocol.
+     """
+-    logger.info("invoke_entry", has_context=context is not None, payload_keys=list(payload.keys()) if payload else [])
++    if not isinstance(payload, dict):
++        yield {"error": "AccessDeniedError", "message": "Authentication required", "statusCode": 403}
++        return
++    logger.info("invoke_entry", has_context=context is not None, payload_keys=list(payload.keys()))
++    _jwt_user_id, _jwt_email, _jwt_groups = extract_jwt_identity(context)
++    if (not isinstance(_jwt_user_id, str) or not _jwt_user_id.strip() or len(_jwt_user_id) > 255
++            or any(ord(char) < 32 or ord(char) == 127 for char in _jwt_user_id)):
++        request_id = payload.get("requestId") or str(uuid.uuid4())
++        if payload.get("stream", False):
++            yield SSEEmitter(request_id).format_error("AccessDenied", "Authentication required", 403)
++        else:
++            yield AccessDeniedError("Authentication required").to_dict(request_id)
++        return
+ 
+     try:
+         await _ensure_initialized()
+@@ -1345,11 +1357,6 @@ async def invoke(payload: dict, context=None):
+ 
+     request_id = payload.get("requestId") or str(uuid.uuid4())
+ 
+-    # See identity.py for the full trust model explanation.
+-    _jwt_user_id, _jwt_email, _jwt_groups = extract_jwt_identity(context)
+-    if not context:
+-        logger.info("invoke_no_context", payload_keys=list(payload.keys()))
+-
+     action = payload.get("action")
+     if action == "getRecentSession" and _session_metadata:
+         user_id = resolve_user_id(payload, _jwt_user_id, _jwt_email)
+diff --git a/packages/context-manager/tests/unit/test_jwt_subject_gate.py b/packages/context-manager/tests/unit/test_jwt_subject_gate.py
+new file mode 100644
+index 0000000..fe38c5e
+--- /dev/null
++++ b/packages/context-manager/tests/unit/test_jwt_subject_gate.py
+@@ -0,0 +1,64 @@
++# Copyright Amazon.com, Inc. or its affiliates. All Rights Reserved.
++# SPDX-License-Identifier: Apache-2.0
++"""Check the runtime's fail-closed forwarded JWT subject boundary."""
++from types import SimpleNamespace
++from unittest.mock import AsyncMock
++
++import jwt
++import pytest
++from coa_serve import main
++
++
++def context_for(sub):
++    token = jwt.encode({"sub": sub}, "x" * 32, algorithm="HS256")
++    return SimpleNamespace(request_headers={"Authorization": "Bearer " + token})
++
++
++async def invoke(payload, context):
++    return [item async for item in main.invoke(payload, context)]
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("action", ["query", "translate", "kbSearch", "graphTraverse", "getRecentSession", "getSessionHistory", "createSession", "listSessions", "deleteSession"])
++@pytest.mark.parametrize("context", [None, SimpleNamespace(request_headers={}), SimpleNamespace(request_headers={"Authorization": "Bearer bad"}), context_for(None), context_for(""), context_for(" "), context_for(123), context_for([]), context_for("a" * 256), context_for("bad\nsubject")])
++async def test_missing_subject_denies_before_initialization_or_payload_identity(monkeypatch, action, context):
++    init = AsyncMock()
++    monkeypatch.setattr(main, "_ensure_initialized", init)
++    payload = {"action": action, "namespace": "victim", "query": "secret", "profile": {"userId": "admin", "groups": ["admin"]}}
++    output = await invoke(payload, context)
++    assert len(output) == 1
++    assert output[0]["statusCode"] == 403
++    assert output[0]["error"] == "AccessDeniedError"
++    assert "admin" not in str(output)
++    init.assert_not_awaited()
++
++
++@pytest.mark.asyncio
++async def test_streaming_denial_is_a_typed_event_before_initialization(monkeypatch):
++    init = AsyncMock()
++    monkeypatch.setattr(main, "_ensure_initialized", init)
++    output = await invoke({"query": "secret", "stream": True, "requestId": "req-1"}, None)
++    event = output[0]
++    assert event.get("type") == "error"
++    assert event["requestId"] == "req-1"
++    assert event["payload"] == {"error": "AccessDenied", "message": "Authentication required", "statusCode": 403}
++    init.assert_not_awaited()
++
++
++@pytest.mark.asyncio
++async def test_forwarded_subject_reaches_existing_initialization(monkeypatch):
++    init = AsyncMock(side_effect=RuntimeError("stop here"))
++    monkeypatch.setattr(main, "_ensure_initialized", init)
++    output = await invoke({"query": "hello"}, context_for("alice"))
++    assert output[0]["error"] == "InternalError"
++    init.assert_awaited_once()
++
++
++@pytest.mark.asyncio
++@pytest.mark.parametrize("payload", [None, [], "bad"])
++async def test_malformed_payload_denies_before_initialization(monkeypatch, payload):
++    init = AsyncMock()
++    monkeypatch.setattr(main, "_ensure_initialized", init)
++    output = await invoke(payload, context_for("alice"))
++    assert output[0]["statusCode"] == 403
++    init.assert_not_awaited()
+diff --git a/packages/context-manager/tests/unit/test_main.py b/packages/context-manager/tests/unit/test_main.py
+index 5eaf6e8..1d1f5e2 100644
+--- a/packages/context-manager/tests/unit/test_main.py
++++ b/packages/context-manager/tests/unit/test_main.py
+@@ -45,6 +45,15 @@ async def _invoke_collect(payload, context=None):
+     """Helper: collect all yielded items from the async generator entrypoint."""
+     from coa_serve.main import invoke
+ 
++    if context is None:
++        import jwt
++        from types import SimpleNamespace
++
++        profile = payload.get("profile") or {}
++        subject = profile.get("userId") or profile.get("email") or "test-user"
++        groups = profile.get("groups") or []
++        token = jwt.encode({"sub": subject, "groups": groups}, "x" * 32, algorithm="HS256")
++        context = SimpleNamespace(request_headers={"Authorization": f"Bearer {token}"})
+     results = []
+     async for item in invoke(payload, context):
+         results.append(item)
+@@ -596,15 +605,15 @@ class TestInvokeFunction:
+ 
+     @patch("coa_serve.main._ensure_initialized")
+     @patch("coa_serve.main.resolve_profile")
+-    async def test_invoke_skips_role_resolution_when_no_identity(
++    async def test_invoke_denies_when_no_identity(
+         self, mock_resolve, mock_init, stub_orchestrator, config
+     ):
+-        """When profile has no userId/email, resolve_profile must NOT be called."""
+-
+-        mock_init.return_value = None
+-
+-        await _invoke_collect({"query": "test", "namespace": "demo", "profile": {}})
++        """An untrusted profile cannot substitute for a forwarded JWT subject."""
++        from coa_serve.main import invoke
+ 
++        result = [item async for item in invoke({"query": "test", "namespace": "demo", "profile": {}}, None)]
++        assert result[0]["statusCode"] == 403
++        mock_init.assert_not_awaited()
+         mock_resolve.assert_not_called()
+ 
+     @patch("coa_serve.main._ensure_initialized")
+@@ -877,20 +886,14 @@ class TestResolveUserIdPriority:
+         mock_metadata.get_recent_for_namespace.assert_called_once_with("jwt-fallback", "ns1")
+ 
+     @patch("coa_serve.main._ensure_initialized")
+-    async def test_no_identity_returns_400(self, mock_init):
+-        """No profile.userId and no JWT should return validation error."""
+-        mock_init.return_value = None
+-
+-        result = await _invoke_collect(
+-            {
+-                "action": "getRecentSession",
+-                "namespace": "ns1",
+-                "profile": {},
+-            }
+-        )
+-
+-        assert result["error"] == "ValidationError"
+-        assert result["statusCode"] == 400
++    async def test_no_identity_is_denied(self, mock_init):
++        """A request with no forwarded JWT cannot fall back to a body profile."""
++        from coa_serve.main import invoke
++
++        result = [item async for item in invoke({"action": "getRecentSession", "profile": {}}, None)]
++        assert result[0]["error"] == "AccessDeniedError"
++        assert result[0]["statusCode"] == 403
++        mock_init.assert_not_awaited()
+ 
+ 
+ class TestHandleTranslate:
+diff --git a/packages/context-manager/tests/unit/test_session_actions.py b/packages/context-manager/tests/unit/test_session_actions.py
+index 0ef56dc..a061826 100644
+--- a/packages/context-manager/tests/unit/test_session_actions.py
++++ b/packages/context-manager/tests/unit/test_session_actions.py
+@@ -132,7 +132,7 @@ class TestGetRecentSession:
+         assert result["statusCode"] == 200
+ 
+     @patch("coa_serve.main._ensure_initialized")
+-    async def test_returns_400_when_no_user_id(self, mock_init):
++    async def test_denies_when_no_user_id(self, mock_init):
+         import coa_serve.main as main_mod
+ 
+         mock_init.return_value = None
+@@ -145,8 +145,10 @@ class TestGetRecentSession:
+             {"action": "getRecentSession", "namespace": "ns1", "profile": {}},
+         )
+ 
+-        assert result["error"] == "ValidationError"
+-        assert result["statusCode"] == 400
++        assert result["error"] == "AccessDeniedError"
++        assert result["statusCode"] == 403
++        mock_init.assert_not_awaited()
++        mock_metadata.get_recent.assert_not_called()
+ 
+ 
+ @agentcore_required
+@@ -372,7 +374,7 @@ class TestListSessions:
+         mock_metadata.list_sessions.assert_called_once()
+ 
+     @patch("coa_serve.main._ensure_initialized")
+-    async def test_returns_400_when_no_user(self, mock_init):
++    async def test_denies_when_no_user(self, mock_init):
+         import coa_serve.main as main_mod
+ 
+         mock_init.return_value = None
+@@ -383,8 +385,10 @@ class TestListSessions:
+             {"action": "listSessions", "namespace": "ns1", "profile": {}},
+         )
+ 
+-        assert result["error"] == "ValidationError"
+-        assert result["statusCode"] == 400
++        assert result["error"] == "AccessDeniedError"
++        assert result["statusCode"] == 403
++        mock_init.assert_not_awaited()
++        mock_metadata.list_sessions.assert_not_called()
+ 
+ 
+ @agentcore_required
