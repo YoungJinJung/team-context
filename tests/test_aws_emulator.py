@@ -563,6 +563,20 @@ def test_link_completion_is_bound_to_identity_and_uses_kms_secrets():
         with pytest.raises(ClientError): secrets.get_secret_value(SecretId=name)
         verifier.verify.side_effect=lambda auth: {'Bearer alice':alice,'Bearer bob':bob}[auth]
         start=attempts.start('Bearer alice','gitlab');state=parse_qs(urlsplit(start.url).query)['state'][0]
+        clock = [1000.0]
+        short_token = json.dumps({'access_token':'fake-access','refresh_token':'fake-refresh','expires_in':5,'token_type':'bearer'}).encode()
+
+        def expire_provider_token(request):
+            if request.full_url.endswith('/oauth/token'):
+                return io.BytesIO(short_token)
+            clock[0] = 1005.0
+            return io.BytesIO(b'{"id":1}')
+
+        with patch('auth.link_completion.time.time', side_effect=lambda: clock[0]), patch('auth.link_completion.open_url',side_effect=expire_provider_token):
+            with pytest.raises(ValueError, match='^Unable to complete account link$'):
+                service.complete('Bearer alice','gitlab',state,start.browser_nonce,'code')
+        with pytest.raises(ClientError): secrets.get_secret_value(SecretId=name)
+        start=attempts.start('Bearer alice','gitlab');state=parse_qs(urlsplit(start.url).query)['state'][0]
         with patch('auth.link_completion.open_url',side_effect=[io.BytesIO(token),io.BytesIO(b'{"id":1}')]):
             assert service.complete('Bearer alice','gitlab',state,start.browser_nonce,'code')=={'connected':True}
         stored=secrets.get_secret_value(SecretId=name)
