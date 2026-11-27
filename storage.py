@@ -2,13 +2,12 @@
 import hashlib
 import json
 import re
-import boto3
+from local_aws import client
 from source_verification import current, status
 
 
 def clients():
-    options = dict(endpoint_url='http://127.0.0.1:4568', region_name='us-east-1', aws_access_key_id='local', aws_secret_access_key='local')
-    return boto3.client('s3', **options), boto3.client('dynamodb', **options)
+    return client('s3'), client('dynamodb')
 
 
 def persist(connection, records):

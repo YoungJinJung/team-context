@@ -10,9 +10,9 @@ TOKENS = {'access_token': 'access', 'refresh_token': 'refresh'}
 
 
 def test_client_uses_only_emulator():
-    with patch('auth.vault.boto3.client') as factory:
+    with patch('auth.vault.emulator_client') as factory:
         vault.client()
-    factory.assert_called_once_with('secretsmanager', endpoint_url='http://127.0.0.1:4568', region_name='us-east-1', aws_access_key_id='local', aws_secret_access_key='local')
+    factory.assert_called_once_with('secretsmanager')
 
 
 @pytest.mark.parametrize('identifier', ['', 'a' * 63, 'a' * 65, 'G' * 64, '../path', None, 12])

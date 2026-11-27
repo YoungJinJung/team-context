@@ -2,7 +2,7 @@
 
 Connect the documents, code changes, tickets, and conversations your team uses every day. Team Context is an open-source prototype for collecting these sources and making their relationships and evidence easier to find.
 
-> **Early local prototype.** The project is not production-ready. It does not deploy AWS infrastructure, enforce production tenant isolation, or integrate with Context Ontology Accelerator (COA) yet. Do not expose the local server to the internet or store real organizational tokens or sensitive data in LocalStack.
+> **Early local prototype.** The project is not production-ready. It does not deploy AWS infrastructure, enforce production tenant isolation, or integrate with Context Ontology Accelerator (COA) yet. Do not expose the local server to the internet or store real organizational tokens or sensitive data in AWS Emulator.
 
 ![Proposed low-cost AWS MVP architecture](docs/assets/architecture-mvp.png)
 
@@ -37,22 +37,23 @@ You need Docker, Python 3.11 or later, and [uv](https://docs.astral.sh/uv/).
 
 ```sh
 uv sync --no-install-project
-docker compose up -d --wait
+mkdir -p .aws-emulator
+TEAM_CONTEXT_UID=$(id -u) TEAM_CONTEXT_GID=$(id -g) docker compose up -d --wait
 uv run --no-sync python init_local.py
 uv run --no-sync python app.py
 ```
 
 Open **http://127.0.0.1:8765**. Enter a GitHub repository as `owner/repository` or a GitLab project as `group/project`. Anonymous source API rate limits apply.
 
-LocalStack listens on `127.0.0.1:4568` and emulates S3, DynamoDB, Secrets Manager, and KMS. It does not create AWS resources or emulate Neptune and OpenSearch. `init_local.py` creates the required local resources without clearing existing data.
+AWS Emulator listens on `127.0.0.1:9297` and provides local S3, DynamoDB, Secrets Manager, and KMS APIs. The app connects using the emulator’s generated credentials and certificate in `.aws-emulator/9297`. The emulator does not create real AWS resources. Neptune and OpenSearch are not used by this local prototype. `init_local.py` creates the required resources without clearing data in the running emulator.
 
-To stop the emulator, run `docker compose down`. The data volume remains. `docker compose down -v` also deletes that volume and its data.
+To stop the emulator, run `docker compose down`. AWS Emulator stores resources in memory: stopping or restarting it deletes all collected data, sessions, and credentials. Existing LocalStack data is not migrated or deleted. Reinitialize the emulator after every restart. AWS Emulator is not a security testing boundary; validate security separately against real isolated services.
 
 ## Use Team Context from an MCP client
 
 The local MCP server exposes the read-only `search_context` tool. It searches only collected public PRs and MRs, rechecks the original source, and returns titles, snippets, timestamps, and source URLs. Private records, tickets, documents, and chat messages are not available through MCP yet. Treat retrieved source text as untrusted content.
 
-Start LocalStack and collect public sources using the web UI as described above. Install the optional MCP dependency once:
+Start AWS Emulator and collect public sources using the web UI as described above. Install the optional MCP dependency once:
 
 ```sh
 uv sync --no-install-project --extra mcp
@@ -75,7 +76,7 @@ Ask the client, for example, “Find pull requests about authentication and cite
 
 ## Connect an OAuth app
 
-The prototype does not ask users to paste personal access tokens. OAuth sessions are separated by provider: local DynamoDB stores hashed session references, and local Secrets Manager stores tokens. The following configuration is for development and mock testing; **do not put real organization credentials in LocalStack**.
+The prototype does not ask users to paste personal access tokens. OAuth sessions are separated by provider: local DynamoDB stores hashed session references, and local Secrets Manager stores tokens. The following configuration is for development and mock testing; **do not put real organization credentials in AWS Emulator**.
 
 | Provider | Configuration | Current use |
 | --- | --- | --- |
@@ -124,12 +125,13 @@ See the [local development guide](docs/development.md) and [connector guide](doc
 # Unit tests
 uv run --no-sync pytest -q
 
-# Integration tests; start LocalStack first
-TEAM_CONTEXT_INTEGRATION=1 uv run --no-sync pytest -q tests/test_localstack.py
+# Integration tests; start AWS Emulator first
+TEAM_CONTEXT_INTEGRATION=1 uv run --no-sync pytest -q tests/test_aws_emulator.py
 
 # Full backend mutation test; remove previous generated results first
 python3 -c "import shutil; shutil.rmtree('mutants', ignore_errors=True)"
 uv run --no-sync mutmut run --max-children 4
+uv run --no-sync mutmut run --max-children 2 'local_aws.*'
 uv run --no-sync mutmut run --max-children 2 'auth.coa_identity.*'
 uv run --no-sync mutmut run --max-children 2 'auth.link_attempts.*'
 uv run --no-sync mutmut run --max-children 2 'auth.link_completion.*'

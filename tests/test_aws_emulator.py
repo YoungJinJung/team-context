@@ -486,15 +486,15 @@ def test_link_attempts_use_kms_and_one_use_dynamodb_condition():
     from unittest.mock import Mock
     from urllib.parse import parse_qs, urlsplit
     from uuid import uuid4
-    import boto3
     pytest.importorskip('coa_common')
     from auth.coa_identity import Principal
     from auth.link_attempts import LinkAttempts, _digest
     initialize()
-    opts={'endpoint_url':'http://127.0.0.1:4568','region_name':'us-east-1','aws_access_key_id':'local','aws_secret_access_key':'local'}
-    db=boto3.client('dynamodb',**opts);kms=boto3.client('kms',**opts)
+    from local_aws import client
+    db=client('dynamodb');kms=client('kms')
     table='tc-link-test-'+uuid4().hex
     db.create_table(TableName=table,KeySchema=[{'AttributeName':'state_key','KeyType':'HASH'}],AttributeDefinitions=[{'AttributeName':'state_key','AttributeType':'S'}],BillingMode='PAY_PER_REQUEST')
+    db.get_waiter('table_exists').wait(TableName=table, WaiterConfig={'Delay': 1, 'MaxAttempts': 30})
     key=kms.create_key(Description='fake test key')['KeyMetadata']['KeyId']
     verifier=Mock();verifier.verify.return_value=Principal('https://example.test','subject-a')
     store=LinkAttempts(verifier,db,kms,table,key,{'github':('client-id','https://link.example/oauth/github/callback')})
@@ -523,7 +523,6 @@ def test_link_completion_is_bound_to_identity_and_uses_kms_secrets():
     from unittest.mock import Mock, patch
     from urllib.parse import parse_qs, urlsplit
     from uuid import uuid4
-    import boto3
     from botocore.exceptions import ClientError
     pytest.importorskip('coa_common')
     from auth.coa_identity import Principal
@@ -532,10 +531,11 @@ def test_link_completion_is_bound_to_identity_and_uses_kms_secrets():
     from auth.source_credentials import SourceCredentials
     from auth.source_provenance import SourceProvenance, content_digest
 
-    opts={'endpoint_url':'http://127.0.0.1:4568','region_name':'us-east-1','aws_access_key_id':'local','aws_secret_access_key':'local'}
-    db=boto3.client('dynamodb',**opts);kms=boto3.client('kms',**opts);secrets=boto3.client('secretsmanager',**opts)
+    from local_aws import client
+    db=client('dynamodb');kms=client('kms');secrets=client('secretsmanager')
     table='tc-link-test-'+uuid4().hex;prefix='tc-test/'+uuid4().hex+'/'
     db.create_table(TableName=table,KeySchema=[{'AttributeName':'state_key','KeyType':'HASH'}],AttributeDefinitions=[{'AttributeName':'state_key','AttributeType':'S'}],BillingMode='PAY_PER_REQUEST')
+    db.get_waiter('table_exists').wait(TableName=table, WaiterConfig={'Delay': 1, 'MaxAttempts': 30})
     key=kms.create_key(Description='fake test key')['KeyMetadata']['KeyId']
     alice=Principal('https://issuer.example','alice');bob=Principal('https://issuer.example','bob')
     verifier=Mock();verifier.verify.side_effect=lambda auth: {'Bearer alice':alice,'Bearer bob':bob}[auth]
