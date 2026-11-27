@@ -89,6 +89,9 @@ class LinkCompletion:
                        'provider':provider, 'provider_user_id':user_id,
                        'access_token':tokens['access_token'], 'refresh_token':tokens['refresh_token'],
                        'expires_at':expires_at}
+            principal = self._verifier.verify(authorization)
+            if not isinstance(principal, Principal) or principal != attempt.principal:
+                raise ValueError('Invalid account link identity')
             self._secrets.create_secret(Name=_secret_name(self._prefix, attempt.principal, provider),
                 SecretString=json.dumps(payload), KmsKeyId=self._key_id)
         except Exception:

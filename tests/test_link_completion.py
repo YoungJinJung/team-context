@@ -186,3 +186,82 @@ def test_longest_allowed_authorization_code_is_accepted(setup):
     service,_,_,_=setup
     with patch('auth.link_completion.open_url',side_effect=[Response(json.dumps(TOKENS).encode()),Response(b'{"id":1}')]):
         assert service.complete('Bearer coa','github','state','nonce','x'*2048)=={'connected':True}
+
+
+@pytest.mark.parametrize('provider', ['github', 'gitlab'])
+@pytest.mark.parametrize('identity', [None, Principal('https://issuer.example', 'user-b'), Principal('https://other.example', 'user-a'), Principal('', 'user-a'), {}])
+def test_identity_must_still_match_before_storing_provider_tokens(setup, provider, identity):
+    service, verifier, attempts, secrets = setup
+    attempts.consume.return_value = GITHUB if provider == 'github' else GITLAB
+    verifier.verify.return_value = identity
+    with patch('auth.link_completion.open_url', side_effect=[Response(json.dumps(TOKENS).encode()), Response(b'{"id":42}')]):
+        with pytest.raises(ValueError, match='^Unable to complete account link$'):
+            service.complete('Bearer coa', provider, 'state', 'nonce', 'code')
+    verifier.verify.assert_called_once_with('Bearer coa')
+    secrets.create_secret.assert_not_called()
+
+
+def test_identity_verification_failure_is_sanitized_and_does_not_store(setup):
+    service, verifier, _, secrets = setup
+    verifier.verify.side_effect = RuntimeError('sensitive-verifier-error')
+    with patch('auth.link_completion.open_url', side_effect=[Response(json.dumps(TOKENS).encode()), Response(b'{"id":42}')]):
+        with pytest.raises(ValueError, match='^Unable to complete account link$') as error:
+            service.complete('Bearer coa', 'github', 'state', 'nonce', 'code')
+    assert 'sensitive-verifier-error' not in str(error.value)
+    secrets.create_secret.assert_not_called()
+
+
+def test_signed_caller_token_expiring_during_provider_request_is_not_stored():
+    import time
+    from uuid import uuid4
+    import jwt
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    from auth.coa_identity import CoaIdentity
+
+    tenant = str(uuid4())
+    issuer = f'https://login.microsoftonline.com/{tenant}/v2.0'
+    principal = Principal(issuer, 'alice')
+    attempt = replace(GITLAB, principal=principal)
+    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    public = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(key.public_key()))
+    public.update({'kid': 'test-key', 'alg': 'RS256', 'use': 'sig'})
+    now = int(time.time())
+    token = jwt.encode({'iss': issuer, 'sub': 'alice', 'aud': 'api://team-context',
+                        'tid': tenant, 'oid': str(uuid4()), 'ver': '2.0',
+                        'scp': 'context.connect', 'exp': now + 30}, key,
+                       algorithm='RS256', headers={'kid': 'test-key'})
+    authorization = 'Bearer ' + token
+    verifier = CoaIdentity(issuer, 'api://team-context', 'us-east-1', 'context.connect', 'entra', True)
+    attempts = Mock(); attempts.consume.return_value = attempt
+    secrets = Mock()
+    service = LinkCompletion(verifier, attempts, secrets, 'key', 'links/')
+    clock = [now]
+
+    def provider_response(request):
+        if request.full_url.endswith('/oauth/token'):
+            return Response(json.dumps(TOKENS).encode())
+        clock[0] = now + 30
+        return Response(b'{"id":42}')
+
+    with patch.object(verifier._authorizer, '_get_jwks', return_value={'keys': [public]}), \
+         patch('auth.coa_identity.time.time', side_effect=lambda: clock[0]), \
+         patch('auth.link_completion.open_url', side_effect=provider_response):
+        assert verifier.verify(authorization) == principal
+        with pytest.raises(ValueError, match='^Unable to complete account link$'):
+            service.complete(authorization, 'gitlab', 'state', 'nonce', 'code')
+    secrets.create_secret.assert_not_called()
+
+
+def test_reverification_rejects_nonprincipal_even_if_it_compares_equal(setup):
+    class Impostor:
+        def __eq__(self, other):
+            return True
+        def __ne__(self, other):
+            return False
+
+    service, verifier, _, secrets = setup
+    verifier.verify.return_value = Impostor()
+    with patch('auth.link_completion.open_url', side_effect=[Response(json.dumps(TOKENS).encode()), Response(b'{"id":42}')]):
+        with pytest.raises(ValueError, match='^Unable to complete account link$'):
+            service.complete('Bearer coa', 'github', 'state', 'nonce', 'code')
+    secrets.create_secret.assert_not_called()
