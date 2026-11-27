@@ -6,11 +6,10 @@ import init_local
 import storage
 
 
-def test_clients_use_local_credentials_and_endpoint():
-    with patch('storage.boto3.client') as client:
+def test_clients_use_emulator_factory():
+    with patch('storage.client') as client:
         storage.clients()
-    assert [c.args[0] for c in client.call_args_list] == ['s3', 'dynamodb']
-    assert client.call_args.kwargs == dict(endpoint_url='http://127.0.0.1:4568', region_name='us-east-1', aws_access_key_id='local', aws_secret_access_key='local')
+    assert [call.args[0] for call in client.call_args_list] == ['s3', 'dynamodb']
 
 
 def test_persist_writes_records_before_status():
@@ -71,15 +70,6 @@ def test_initialize_propagates_permission_error():
             assert False
         except ClientError as e:
             assert e.response['Error']['Code'] == '403'
-
-
-def test_both_clients_receive_endpoint_configuration():
-    with patch('storage.boto3.client') as client:
-        storage.clients()
-    for call in client.call_args_list:
-        assert call.kwargs['endpoint_url'] == 'http://127.0.0.1:4568'
-        assert call.kwargs['aws_access_key_id'] == 'local'
-        assert call.kwargs['aws_secret_access_key'] == 'local'
 
 
 def test_zero_records_updates_count():

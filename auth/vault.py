@@ -2,12 +2,12 @@
 import json
 import re
 import secrets
-import boto3
+from local_aws import client as emulator_client
 from botocore.exceptions import ClientError
 
 
 def client():
-    return boto3.client('secretsmanager', endpoint_url='http://127.0.0.1:4568', region_name='us-east-1', aws_access_key_id='local', aws_secret_access_key='local')
+    return emulator_client('secretsmanager')
 
 
 def _name(secret_id):

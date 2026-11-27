@@ -17,13 +17,16 @@ jobs:
       - name: Unit tests
         run: uv run --no-sync pytest -q
       - name: Start local AWS emulator
-        run: docker compose up -d --wait
+        run: |
+          mkdir -p .aws-emulator
+          TEAM_CONTEXT_UID=$(id -u) TEAM_CONTEXT_GID=$(id -g) docker compose up -d --wait
       - name: Emulator integration
-        run: TEAM_CONTEXT_INTEGRATION=1 uv run --no-sync pytest -q tests/test_localstack.py
+        run: TEAM_CONTEXT_INTEGRATION=1 uv run --no-sync pytest -q tests/test_aws_emulator.py
       - name: Mutation tests
         run: |
           uv run --no-sync mutmut run --max-children 2
           # Re-run COA authentication mutations after the full run to avoid false kills in the forked runner.
+          uv run --no-sync mutmut run --max-children 2 'local_aws.*'
           uv run --no-sync mutmut run --max-children 2 'auth.coa_identity.*'
           uv run --no-sync mutmut run --max-children 2 'auth.link_attempts.*'
           uv run --no-sync mutmut run --max-children 2 'auth.link_completion.*'
