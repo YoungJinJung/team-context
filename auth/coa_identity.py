@@ -19,7 +19,11 @@ def _nonempty(value):
 
 
 class CoaIdentity:
-    """Verify delegated user tokens using COA's configured token authorizer."""
+    """Verify delegated user tokens using COA's configured token authorizer.
+
+    For Cognito, audience is the app client ID. Resource-bound tokens with a
+    different audience are denied until both values can be configured.
+    """
 
     def __init__(self, issuer, audience, region, scope, mode, auth_enabled):
         if auth_enabled is not True or not all(_nonempty(value) for value in (issuer, audience, region, scope)) or len(scope.split()) != 1:
@@ -42,6 +46,7 @@ class CoaIdentity:
         else:
             raise ValueError('Invalid identity provider')
         self._issuer = issuer
+        self._client_id = audience if mode == 'cognito' else None
         self._scope = scope
         self._mode = mode
         self._authorizer = build_token_authorizer(issuer=issuer, region=region, client_id=audience)
@@ -69,7 +74,7 @@ class CoaIdentity:
                     return None
                 scopes = claims.get('scp')
             else:
-                if claims.get('token_use') != 'access' or not _nonempty(claims.get('username')):
+                if claims.get('token_use') != 'access' or claims.get('client_id') != self._client_id or not _nonempty(claims.get('username')):
                     return None
                 scopes = claims.get('scope')
             if not isinstance(scopes, str) or self._scope not in scopes.split():
