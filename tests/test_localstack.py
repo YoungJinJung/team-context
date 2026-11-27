@@ -546,8 +546,23 @@ def test_link_completion_is_bound_to_identity_and_uses_kms_secrets():
         start=attempts.start('Bearer alice','gitlab');state=parse_qs(urlsplit(start.url).query)['state'][0]
         with pytest.raises(ValueError): service.complete('Bearer bob','gitlab',state,start.browser_nonce,'code')
         with pytest.raises(ClientError): secrets.get_secret_value(SecretId=name)
+        active = [True]
+        verifier.verify.side_effect = lambda auth: alice if auth == 'Bearer alice' and active[0] else None
         start=attempts.start('Bearer alice','gitlab');state=parse_qs(urlsplit(start.url).query)['state'][0]
         token=json.dumps({'access_token':'fake-access','refresh_token':'fake-refresh','expires_in':3600,'token_type':'bearer'}).encode()
+
+        def expire_during_user_lookup(request):
+            if request.full_url.endswith('/oauth/token'):
+                return io.BytesIO(token)
+            active[0] = False
+            return io.BytesIO(b'{"id":1}')
+
+        with patch('auth.link_completion.open_url',side_effect=expire_during_user_lookup):
+            with pytest.raises(ValueError, match='^Unable to complete account link$'):
+                service.complete('Bearer alice','gitlab',state,start.browser_nonce,'code')
+        with pytest.raises(ClientError): secrets.get_secret_value(SecretId=name)
+        verifier.verify.side_effect=lambda auth: {'Bearer alice':alice,'Bearer bob':bob}[auth]
+        start=attempts.start('Bearer alice','gitlab');state=parse_qs(urlsplit(start.url).query)['state'][0]
         with patch('auth.link_completion.open_url',side_effect=[io.BytesIO(token),io.BytesIO(b'{"id":1}')]):
             assert service.complete('Bearer alice','gitlab',state,start.browser_nonce,'code')=={'connected':True}
         stored=secrets.get_secret_value(SecretId=name)
