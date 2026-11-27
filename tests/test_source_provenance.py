@@ -38,7 +38,7 @@ def test_github_rechecks_scope_and_specific_item_as_authenticated_user(service):
 
 def test_gitlab_rechecks_scope_and_specific_item_as_authenticated_user(service):
     guard,credentials=service
-    with patch('auth.source_provenance.gitlab_private._project',return_value=17) as project, patch('auth.source_provenance.gitlab_private._get',return_value=GL_ITEM) as get:
+    with patch('auth.source_provenance.gitlab_private._project',return_value=(17,'acme/repo')) as project, patch('auth.source_provenance.gitlab_private._get',return_value=GL_ITEM) as get:
         assert guard.allows('Bearer bob',proof('gitlab')) is True
     credentials.resolve.assert_called_once_with('Bearer bob','gitlab')
     project.assert_called_once_with('fake-token','acme/repo')
@@ -60,7 +60,7 @@ def test_changed_item_denied_even_when_requester_has_access(service,provider):
     item=deepcopy(GH_ITEM if provider=='github' else GL_ITEM)
     item['title']='Changed title'
     target='github_private' if provider=='github' else 'gitlab_private'
-    scope=(17,'acme/repo') if provider=='github' else 17
+    scope=(17,'acme/repo')
     scope_method='_repository' if provider=='github' else '_project'
     with patch(f'auth.source_provenance.{target}.{scope_method}',return_value=scope), patch(f'auth.source_provenance.{target}._get',return_value=item):
         assert guard.allows('Bearer alice',proof(provider)) is False
@@ -70,7 +70,7 @@ def test_changed_item_denied_even_when_requester_has_access(service,provider):
 def test_wrong_scope_denies_before_fetching_item(service,provider):
     guard,_=service
     target='github_private' if provider=='github' else 'gitlab_private'
-    scope=(18,'acme/repo') if provider=='github' else 18
+    scope=(18,'acme/repo')
     scope_method='_repository' if provider=='github' else '_project'
     with patch(f'auth.source_provenance.{target}.{scope_method}',return_value=scope), patch(f'auth.source_provenance.{target}._get') as get:
         assert guard.allows('Bearer alice',proof(provider)) is False
@@ -89,7 +89,7 @@ def test_gitlab_response_for_other_item_is_denied(service):
     guard,_=service
     item={**GL_ITEM,'iid':6,'web_url':'https://gitlab.com/acme/repo/-/merge_requests/6'}
     record={**GL_RECORD,'iid':6,'url':item['web_url']}
-    with patch('auth.source_provenance.gitlab_private._project',return_value=17), patch('auth.source_provenance.gitlab_private._get',return_value=item):
+    with patch('auth.source_provenance.gitlab_private._project',return_value=(17,'acme/repo')), patch('auth.source_provenance.gitlab_private._get',return_value=item):
         assert guard.allows('Bearer alice',{**proof('gitlab'),'digest':content_digest(record)}) is False
 
 
@@ -104,3 +104,17 @@ def test_revocation_deletion_or_outage_fails_closed(service,stage):
 def test_digest_is_independent_of_dictionary_order_and_covers_content():
     assert content_digest(GH_RECORD)==content_digest(dict(reversed(list(GH_RECORD.items()))))
     assert content_digest(GH_RECORD)!=content_digest({**GH_RECORD,'body':'changed'})
+
+
+@pytest.mark.parametrize('url', [
+    'https://gitlab.com/another/repo/-/merge_requests/5',
+    'https://gitlab.com/acme/repo/-/merge_requests/6',
+    'https://gitlab.com/acme/repo/-/merge_requests/5?redirect=other',
+    'https://gitlab.com/acme/repo/-/merge_requests/5#note',
+])
+def test_gitlab_provenance_rejects_mismatched_url_even_with_matching_digest(service, url):
+    guard, _ = service
+    item = {**GL_ITEM, 'web_url': url}
+    record = {**GL_RECORD, 'url': url}
+    with patch('auth.source_provenance.gitlab_private._project', return_value=(17,'acme/repo')), patch('auth.source_provenance.gitlab_private._get', return_value=item):
+        assert guard.allows('Bearer bob', {**proof('gitlab'), 'digest':content_digest(record)}) is False

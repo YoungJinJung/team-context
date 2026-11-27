@@ -42,11 +42,11 @@ class SourceProvenance:
                 if record['number'] != number:
                     return False
             else:
-                current_scope = gitlab_private._project(token, project)
+                current_scope, name = gitlab_private._project(token, project)
                 if current_scope != scope_id:
                     return False
                 item = gitlab_private._get(token, f'projects/{current_scope}/merge_requests/{number}')
-                record = gitlab_private._record(item, current_scope)
+                record = gitlab_private._record(item, current_scope, name)
                 if record['iid'] != number:
                     return False
             return hmac.compare_digest(content_digest(record), digest)

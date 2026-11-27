@@ -104,7 +104,7 @@ GitHub private PR snapshots use a separate local S3 key space keyed by immutable
 
 Private GitLab snapshots use a separate local S3 key space. A collection verifies the user's project access, reads up to ten data pages plus an empty confirmation page, and writes one snapshot only after the read succeeds. It rejects a snapshot larger than 2 MiB. Source changes during pagination can still cause omissions, so recollection may be necessary.
 
-A local operator can list project or repository IDs and request deletion of one snapshot, including after the original user's access is revoked. Stop the server before removing a snapshot; a later collection can recreate it.
+GitLab private source URLs must match the canonical project path returned by GitLab and the merge request number. A local operator can list project or repository IDs and request deletion of one snapshot, including after the original user's access is revoked. Stop the server before removing a snapshot; a later collection can recreate it.
 
 ```sh
 uv run --no-sync python -m scripts.private_snapshots list

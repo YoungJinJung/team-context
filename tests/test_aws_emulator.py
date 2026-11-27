@@ -317,7 +317,7 @@ def test_private_gitlab_snapshot_requires_current_requester_access():
     def provider(token, path):
         if token != 'allowed' or not state['allowed']:
             raise HTTPError('https://gitlab.com', 403, 'denied', {}, None)
-        if path == 'projects/' + encoded_project: return {'id':project_id}
+        if path == 'projects/' + encoded_project: return {'id':project_id,'path_with_namespace':'a/b'}
         if path.endswith('?scope=all&per_page=100&page=1'): return [record]
         if path.endswith('?scope=all&per_page=100&page=2'): return []
         if path.endswith('/merge_requests/1'): return {**record, 'title':state['title']}
@@ -348,14 +348,14 @@ def test_failed_private_collection_preserves_previous_snapshot():
     initialize()
     project_id=uuid.uuid4().int % 1000000000000000000 + 1
     first={'iid':1,'project_id':project_id,'title':'previous','web_url':'https://gitlab.com/a/b/-/merge_requests/1','updated_at':'2026-01-01','description':'body'}
-    full=[{**first,'iid':n} for n in range(1,101)]
+    full=[{**first,'iid':n,'web_url':f'https://gitlab.com/a/b/-/merge_requests/{n}'} for n in range(1,101)]
     s3,_=clients()
     key=f'private/gitlab/{project_id}.json'
     try:
-        with patch('auth.gitlab_private._get', side_effect=[{'id':project_id},[first],[]]):
+        with patch('auth.gitlab_private._get', side_effect=[{'id':project_id,'path_with_namespace':'a/b'},[first],[]]):
             assert gitlab_private.collect('viewer','a/b') == 1
         before=s3.get_object(Bucket='team-context-records',Key=key)['Body'].read()
-        with patch('auth.gitlab_private._get', side_effect=[{'id':project_id},full,HTTPError('https://gitlab.com',500,'failed',{},None)]):
+        with patch('auth.gitlab_private._get', side_effect=[{'id':project_id,'path_with_namespace':'a/b'},full,HTTPError('https://gitlab.com',500,'failed',{},None)]):
             with pytest.raises(HTTPError): gitlab_private.collect('viewer','a/b')
         assert s3.get_object(Bucket='team-context-records',Key=key)['Body'].read() == before
     finally:
@@ -434,7 +434,7 @@ def test_github_private_snapshot_requires_requester_and_revalidates_original():
     from uuid import uuid4
     from auth import github_private
     project_id = int(uuid4().hex[:10],16) or 1
-    record = {'number':1,'base':{'repo':{'id':project_id}},'title':'local secret phrase','html_url':'https://github.com/a/b/pull/1','updated_at':'2026-01-01','body':'private body'}
+    record = {'number':1,'base':{'repo':{'id':project_id,'path_with_namespace':'a/b'}},'title':'local secret phrase','html_url':'https://github.com/a/b/pull/1','updated_at':'2026-01-01','body':'private body'}
     meta = {'id':project_id,'full_name':'a/b'}
     key = f'private/github/{project_id}.json'
     s3, _ = clients()
@@ -589,8 +589,14 @@ def test_link_completion_is_bound_to_identity_and_uses_kms_secrets():
         record={'iid':5,'project_id':17,'title':'fixture','body':'text','url':'https://gitlab.com/acme/repo/-/merge_requests/5','updated_at':'2026-01-01'}
         item={'iid':5,'project_id':17,'title':'fixture','description':'text','web_url':record['url'],'updated_at':record['updated_at']}
         provenance={'provider':'gitlab','project':'acme/repo','scope_id':17,'number':5,'digest':content_digest(record)}
-        with patch('auth.gitlab_private.open_url',side_effect=[io.BytesIO(b'{"id":17}'),io.BytesIO(json.dumps(item).encode())]):
+        with patch('auth.gitlab_private.open_url',side_effect=[io.BytesIO(b'{"id":17,"path_with_namespace":"acme/repo"}'),io.BytesIO(json.dumps(item).encode())]):
             assert guard.allows('Bearer alice',provenance) is True
+        forged_url = 'https://gitlab.com/other/project/-/merge_requests/5'
+        forged_record = {**record, 'url':forged_url}
+        forged_item = {**item, 'web_url':forged_url}
+        forged_provenance = {**provenance, 'digest':content_digest(forged_record)}
+        with patch('auth.gitlab_private.open_url',side_effect=[io.BytesIO(b'{"id":17,"path_with_namespace":"acme/repo"}'),io.BytesIO(json.dumps(forged_item).encode())]):
+            assert guard.allows('Bearer alice',forged_provenance) is False
         assert guard.allows('Bearer bob',provenance) is False
         with pytest.raises(ValueError): service.complete('Bearer alice','gitlab',state,start.browser_nonce,'code')
         assert service.disconnect('Bearer bob','gitlab')=={'connected':False}
