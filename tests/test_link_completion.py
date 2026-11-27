@@ -265,3 +265,45 @@ def test_reverification_rejects_nonprincipal_even_if_it_compares_equal(setup):
         with pytest.raises(ValueError, match='^Unable to complete account link$'):
             service.complete('Bearer coa', 'github', 'state', 'nonce', 'code')
     secrets.create_secret.assert_not_called()
+
+
+@pytest.mark.parametrize('provider', ['github', 'gitlab'])
+@pytest.mark.parametrize('stage', ['exchange', 'user', 'verify'])
+def test_expired_provider_token_is_not_stored(setup, provider, stage):
+    service, verifier, attempts, secrets = setup
+    attempts.consume.return_value = GITHUB if provider == 'github' else GITLAB
+    clock = [1000.0]
+    tokens = {**TOKENS, 'expires_in': 5}
+
+    def respond(request):
+        if request.full_url.endswith('access_token') or request.full_url.endswith('/oauth/token'):
+            if stage == 'exchange': clock[0] = 1005.0
+            return Response(json.dumps(tokens).encode())
+        if stage == 'user': clock[0] = 1005.0
+        return Response(b'{"id":42}')
+
+    def verify(_):
+        if stage == 'verify': clock[0] = 1005.0
+        return PRINCIPAL
+
+    verifier.verify.side_effect = verify
+    with patch('auth.link_completion.time.time', side_effect=lambda: clock[0]), patch('auth.link_completion.open_url', side_effect=respond):
+        with pytest.raises(ValueError, match='^Unable to complete account link$'):
+            service.complete('Bearer coa', provider, 'state', 'nonce', 'code')
+    secrets.create_secret.assert_not_called()
+
+
+def test_provider_token_just_before_expiry_is_stored(setup):
+    service, _, _, secrets = setup
+    clock = [1000.0]
+    tokens = {**TOKENS, 'expires_in': 5}
+
+    def respond(request):
+        if request.full_url.endswith('access_token'):
+            return Response(json.dumps(tokens).encode())
+        clock[0] = 1004.9
+        return Response(b'{"id":42}')
+
+    with patch('auth.link_completion.time.time', side_effect=lambda: clock[0]), patch('auth.link_completion.open_url', side_effect=respond):
+        assert service.complete('Bearer coa', 'github', 'state', 'nonce', 'code') == {'connected': True}
+    assert json.loads(secrets.create_secret.call_args.kwargs['SecretString'])['expires_at'] == 1005

@@ -82,8 +82,9 @@ class LinkCompletion:
             attempt = self._attempts.consume(authorization, provider, state, browser_nonce)
             if not isinstance(attempt, ConsumedAttempt) or attempt.provider != provider or not isinstance(attempt.principal, Principal) or not _nonempty(attempt.principal.issuer) or not _nonempty(attempt.principal.subject):
                 raise ValueError('Invalid account link')
+            exchange_started_at = int(time.time())
             tokens = self._exchange(attempt, code)
-            expires_at = int(time.time()) + tokens['expires_in']
+            expires_at = exchange_started_at + tokens['expires_in']
             user_id = self._provider_user(provider, tokens['access_token'])
             payload = {'issuer':attempt.principal.issuer, 'subject':attempt.principal.subject,
                        'provider':provider, 'provider_user_id':user_id,
@@ -92,6 +93,8 @@ class LinkCompletion:
             principal = self._verifier.verify(authorization)
             if not isinstance(principal, Principal) or principal != attempt.principal:
                 raise ValueError('Invalid account link identity')
+            if time.time() >= expires_at:
+                raise ValueError('Expired provider credential')
             self._secrets.create_secret(Name=_secret_name(self._prefix, attempt.principal, provider),
                 SecretString=json.dumps(payload), KmsKeyId=self._key_id)
         except Exception:
