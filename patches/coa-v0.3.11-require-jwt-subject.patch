@@ -176,3 +176,51 @@ index 5eaf6e8..1d1f5e2 100644
  
  
  class TestHandleTranslate:
+diff --git a/packages/context-manager/tests/unit/test_session_actions.py b/packages/context-manager/tests/unit/test_session_actions.py
+index 0ef56dc..a061826 100644
+--- a/packages/context-manager/tests/unit/test_session_actions.py
++++ b/packages/context-manager/tests/unit/test_session_actions.py
+@@ -132,7 +132,7 @@ class TestGetRecentSession:
+         assert result["statusCode"] == 200
+ 
+     @patch("coa_serve.main._ensure_initialized")
+-    async def test_returns_400_when_no_user_id(self, mock_init):
++    async def test_denies_when_no_user_id(self, mock_init):
+         import coa_serve.main as main_mod
+ 
+         mock_init.return_value = None
+@@ -145,8 +145,10 @@ class TestGetRecentSession:
+             {"action": "getRecentSession", "namespace": "ns1", "profile": {}},
+         )
+ 
+-        assert result["error"] == "ValidationError"
+-        assert result["statusCode"] == 400
++        assert result["error"] == "AccessDeniedError"
++        assert result["statusCode"] == 403
++        mock_init.assert_not_awaited()
++        mock_metadata.get_recent.assert_not_called()
+ 
+ 
+ @agentcore_required
+@@ -372,7 +374,7 @@ class TestListSessions:
+         mock_metadata.list_sessions.assert_called_once()
+ 
+     @patch("coa_serve.main._ensure_initialized")
+-    async def test_returns_400_when_no_user(self, mock_init):
++    async def test_denies_when_no_user(self, mock_init):
+         import coa_serve.main as main_mod
+ 
+         mock_init.return_value = None
+@@ -383,8 +385,10 @@ class TestListSessions:
+             {"action": "listSessions", "namespace": "ns1", "profile": {}},
+         )
+ 
+-        assert result["error"] == "ValidationError"
+-        assert result["statusCode"] == 400
++        assert result["error"] == "AccessDeniedError"
++        assert result["statusCode"] == 403
++        mock_init.assert_not_awaited()
++        mock_metadata.list_sessions.assert_not_called()
+ 
+ 
+ @agentcore_required
